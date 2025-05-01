@@ -1,37 +1,28 @@
 use uuid::Uuid;
 use kameo::prelude::*;
 use crate::worker::Worker;
-use crate::messages::{OrcaRequest, OrcaStates, ActorType, MatriarchMessage, MatriarchReply};
-
-use std::pin::Pin;
-use std::future::Future;
+use crate::messages::*;
 use tokio::task::JoinHandle;
-use serde::Serialize;
 use serde_json;
 use async_trait::async_trait;
-use crate::messages::{OrcaMessageRecipient, ErasedOrcaSpawner};
+use crate::types::*;
 
-#[derive(Debug)]
-struct InternalTaskCompleted {
-    result_string: String,
-}
-
-pub struct Orca<R: Serialize + Send + Sync + 'static> {
-    id: Uuid,
+pub struct Orca<R: OrcaTaskResult> {
+    pub id: Uuid,
     pub name: String,
     state: OrcaStatesTypes,
-    task: Option<Pin<Box<dyn Future<Output = R> + Send + Sync>>>,
+    task: Option<TaskFuture<R>>,
     handle: Option<JoinHandle<()>>,
     pub params: Vec<String>,
     pub worker: Option<ActorRef<Worker>>,
 }
 
-impl<R: Serialize + Send + Sync + 'static> Orca<R> {
-    pub fn new(name: String, task_future: Pin<Box<dyn Future<Output = R> + Send + Sync >>) -> Self {
-        let id = Uuid::new_v4();
+impl<R: OrcaTaskResult> Orca<R> {
+    pub fn new(id: Uuid, name: String, task_future: TaskFuture<R>) -> Self {
+        let state = OrcaState::<Registered>::new(0, vec![]);
         Self {
             id, 
-            state: OrcaStatesTypes::Registered(OrcaState::new(0, vec![])),
+            state: OrcaStatesTypes::Registered(state),
             params: vec![],
             worker: None,
             name: name,
@@ -42,26 +33,92 @@ impl<R: Serialize + Send + Sync + 'static> Orca<R> {
     pub async fn submit(&self) {
         println!("Task submitted: {}", self.id);
         if let Some(worker) = &self.worker {
-            let reply = worker.tell(MatriarchMessage {
-                message: OrcaRequest {
-                    task_id: self.id.to_string(),
+            let result = worker.tell(MatriarchMessage {
+                message: TransitionState {
+                    task_id: self.id,
                     new_state: OrcaStates::Submitted,
                 },
                 recipient: ActorType::Processor,
             }).await;
-            println!("Task submitted reply: {:?}", reply);
+            match result {
+                Ok(_) => {
+                    println!("Initial submit request sent successfully for Task {}", self.id);
+                }
+                Err(e) => {
+                    eprintln!("Failed to send initial submit request for Task {}: {}", self.id, e);
+                }
+            }
         } else {
-            eprintln!("Cannot submit task {}: worker not set", self.id);
+            eprintln!("Cannot request initial submit for task {}: worker not set", self.id);
+        }
+    }
+
+    async fn transition_to_state(&mut self, new_state_request: OrcaStates) -> Result<(), OrcaError> {
+        println!("Task {} attempting transition to {:?}", self.id, new_state_request);
+
+        let next_state_type = match (&self.state, new_state_request) {
+            (OrcaStatesTypes::Registered(_), OrcaStates::Submitted) => {
+                Ok(OrcaStatesTypes::Submitted(OrcaState { state: Submitted {} }))
+            },
+            (OrcaStatesTypes::Submitted(_), OrcaStates::Running) => {
+                 Ok(OrcaStatesTypes::Running(OrcaState { state: Running {} }))
+            }
+            (OrcaStatesTypes::Scheduled(_), OrcaStates::Running) => {
+                Ok(OrcaStatesTypes::Running(OrcaState { state: Running {} }))
+            }
+             (OrcaStatesTypes::Running(_), OrcaStates::Completed) => {
+                Ok(OrcaStatesTypes::Completed(OrcaState { 
+                    state: Completed { 
+                        params: self.params.clone(), 
+                        result: "".to_string() 
+                    } 
+                 }))
+             }
+            (current, target) => {
+                let err_msg = format!("Invalid state transition from {} to {:?} for Task {}", current, target, self.id);
+                eprintln!("{}", err_msg);
+                Err(OrcaError(err_msg))
+            }
+        };
+
+        match next_state_type {
+            Ok(next_state) => {
+                self.state = next_state;
+                let current_state_enum = self.state.to_orca_state_enum();
+                println!("Task {} state updated to {}", self.id, self.state);
+
+                if let Some(worker) = &self.worker {
+                    let _ = worker.tell(MatriarchMessage {
+                        message: TransitionState {
+                            task_id: self.id,
+                            new_state: current_state_enum,
+                        },
+                        recipient: ActorType::Processor,
+                    }).await.map_err(|e| {
+                         eprintln!("Failed to notify worker of state change for Task {}: {}", self.id, e);
+                         OrcaError(format!("Worker notification failed: {}", e))
+                    });
+                } else {
+                     eprintln!("Task {} cannot notify worker: worker not set", self.id);
+                }
+                 Ok(())
+            }
+             Err(e) => Err(e),
         }
     }
 }
 
-impl<R: Serialize + Send + Sync + 'static> Actor for Orca<R> {
+
+
+impl<R: OrcaTaskResult> Actor for Orca<R> {
     type Args = Self;
     type Error = OrcaError;
 
     async fn on_start(mut args: Self::Args, actor_ref: ActorRef<Orca<R>>) -> Result<Self, OrcaError> {
         println!("Task starting: {}", args.id);
+
+        
+
         if let Some(task_future) = args.task.take() {
             let self_ref = actor_ref.clone();
             let task_id = args.id.clone();
@@ -74,19 +131,18 @@ impl<R: Serialize + Send + Sync + 'static> Actor for Orca<R> {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("Failed to serialize result for task {}: {}", task_id, e);
-                        format!("Serialization Error: {}", e)
+                        format!(r#"{{"error": "Serialization Error: {}"}}"#, e.to_string().replace('"', "\\\""))
                     }
                 };
 
-                let completion_msg = InternalTaskCompleted { result_string };
-                if let Err(e) = self_ref.tell(completion_msg).await { 
-                    eprintln!("Failed to send completion message for task {}: {}", task_id, e);
+                let completion_msg = OrcaTaskCompleted { result_string };
+                if let Err(e) = self_ref.ask(completion_msg).await { 
+                    eprintln!("Failed to send internal completion message for task {}: {}", task_id, e);
                 }
             });
             args.handle = Some(handle); 
         } else {
             eprintln!("Task {} starting without a future to run!", args.id);
-            return Err(OrcaError(format!("Task {} created without a future", args.id)));
         }
         
         Ok(args)
@@ -99,103 +155,163 @@ impl<R: Serialize + Send + Sync + 'static> Actor for Orca<R> {
         }
         Ok(())
     }
-}   
+}
 
-impl<R: Serialize + Send + Sync + 'static> Message<MatriarchMessage<OrcaRequest>> for Orca<R> {
+
+
+struct GetField {
+    pub field: OrcaData,
+}
+impl<R: OrcaTaskResult> Message<GetField> for Orca<R> {
+    type Reply = GetOrcaFieldReply;
+
+    async fn handle(
+        &mut self,
+        _message: GetField,
+        _ctx: &mut Context<Orca<R>, Self::Reply>,
+    ) -> Self::Reply {
+        match _message.field {
+            OrcaData::Id(id) => GetOrcaFieldReply { field: OrcaData::Id(self.id) },
+            OrcaData::Name(name) => GetOrcaFieldReply { field: OrcaData::Name(self.name.clone()) },
+            OrcaData::State(state) => GetOrcaFieldReply { field: OrcaData::State(self.state.clone()) },
+            OrcaData::Params(params) => GetOrcaFieldReply { field: OrcaData::Params(self.params.clone()) },
+        }
+    }
+}
+
+impl<R: OrcaTaskResult> Message<MatriarchMessage<TransitionState>> for Orca<R> {
     type Reply = MatriarchReply;
 
     async fn handle(
         &mut self,
-        message: MatriarchMessage<OrcaRequest>,
-        ctx: &mut Context<Orca<R>, MatriarchReply>,
+        message: MatriarchMessage<TransitionState>,
+        _ctx: &mut Context<Orca<R>, MatriarchReply>,
     ) -> Self::Reply {
-        println!("Task {} received MatriarchMessage: {:?}", self.id, message.message.new_state);
-        match message.message.new_state {
-            OrcaStates::Submitted => {
-                println!("Handling Submitted state for Task {}", self.id);
-                 match &self.state {
-                     OrcaStatesTypes::Registered(_) => {
-                         self.state = OrcaStatesTypes::Submitted(OrcaState { state: Submitted {} });
-                         println!("Task {} state updated to Submitted", self.id);
-                     }
-                     _ => {
-                         eprintln!("Task {} received Submitted request but was not in Registered state", self.id);
-                     }
-                 }
-            }
-            _ => {
-                println!("Task {} ignoring MatriarchMessage state: {:?}", self.id, message.message.new_state);
+        println!("Task {} received MatriarchMessage for state: {:?}", self.id, message.message.new_state);
+        
+        match self.transition_to_state(message.message.new_state).await {
+            Ok(_) => MatriarchReply { success: true },
+            Err(e) => {
+                eprintln!("State transition failed for Task {}: {}", self.id, e);
+                MatriarchReply { success: false }
             }
         }
-        MatriarchReply { success: true }
     }
 }
 
-impl<R: Serialize + Send + Sync + 'static> Message<InternalTaskCompleted> for Orca<R> {
+impl<R: OrcaTaskResult> Message<OrcaTaskCompleted> for Orca<R> {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        message: InternalTaskCompleted,
+        message: OrcaTaskCompleted,
         _ctx: &mut Context<Orca<R>, Self::Reply>,
     ) -> Self::Reply {
         println!("Task {} received internal completion", self.id);
         
-        self.state = OrcaStatesTypes::Completed(OrcaState { 
-            state: Completed { 
-                params: self.params.clone(),
-                result: message.result_string
+        match self.transition_to_state(OrcaStates::Completed).await {
+            Ok(_) => {
+                if let OrcaStatesTypes::Completed(ref mut completed_state) = self.state {
+                     completed_state.state.result = message.result_string;
+                     println!("Task {} result updated in Completed state", self.id);
+                } else {
+                     eprintln!("Task {} is not in Completed state after successful transition attempt!", self.id);
+                }
             }
-        });
-        println!("Task {} state updated to Completed", self.id);
-        
-        // TODO: Notify worker or other actors if needed
+             Err(e) => {
+                 eprintln!("Failed to transition Task {} to Completed state: {}", self.id, e);
+             }
+        }
     }
 }
 
 #[async_trait]
-impl<R: Serialize + Send + Sync + 'static> OrcaMessageRecipient for ActorRef<Orca<R>> {
+impl<R: OrcaTaskResult> SpawnedOrca for ActorRef<Orca<R>> {
     async fn forward_matriarch_request(
         &self,
-        message: MatriarchMessage<OrcaRequest>,
+        message: MatriarchMessage<TransitionState>,
     ) -> Result<MatriarchReply, OrcaError> {
         self.ask(message).await.map_err(|e| OrcaError(format!("Kameo error: {}", e)))
     }
+    async fn get_id(&self) -> Result<Uuid, OrcaError> {
+        let message = GetField { field: OrcaData::Id(Uuid::nil()) }; 
+        let reply = self.ask(message).await
+            .map_err(|e| OrcaError(format!("Kameo ask error: {}", e)))?;
+        
+        match reply.field {
+            OrcaData::Id(id) => Ok(id),
+            _ => Err(OrcaError("Unexpected reply type when asking for Id".to_string())),
+        }
+    }
+
+    async fn get_field(&self, field: OrcaData) -> Result<OrcaData, OrcaError> {
+        let message = GetField { field };
+        let reply = self.ask(message).await
+            .map_err(|e| OrcaError(format!("Kameo ask error: {}", e)))?;
+        Ok(reply.field)
+    }
+}
+#[async_trait]
+pub trait SpawnedOrca: Send + Sync {
+    async fn forward_matriarch_request(
+        &self,
+        message: MatriarchMessage<TransitionState>,
+    ) -> Result<MatriarchReply, OrcaError>;
+    async fn get_id(&self) -> Result<Uuid, OrcaError>;
+    async fn get_field(&self, field: OrcaData) -> Result<OrcaData, OrcaError>;
+
+}
+
+
+#[async_trait]
+pub trait OrcaSpawner: Send + Sync {
+    fn name(&self) -> String;
+    /// Spawns the specific Orca<R> actor.
+    /// Takes ownership of self and the Worker's ActorRef.
+    /// Returns a Box<dyn OrcaMessageRecipient> for the spawned actor.
+    async fn spawn_and_get_orca(
+        self: Box<Self>,
+        id: Uuid,
+        worker_ref: ActorRef<Worker>
+    ) -> Result<Box<dyn SpawnedOrca>, OrcaError>; // Use OrcaError from task.rs
 }
 
 /// Helper struct to hold information needed to spawn a specific Orca<R>.
-pub struct OrcaSpawner<R: Serialize + Send + Sync + 'static> {
+pub struct RegisteredTask<R: OrcaTaskResult> {
     name: String,
-    task_future: Pin<Box<dyn Future<Output = R> + Send + Sync >>,
+    task_future: TaskFuture<R>,
 }
 
-impl<R: Serialize + Send + Sync + 'static> OrcaSpawner<R> {
-     // Factory method for creating the spawner
-    pub fn new(name: String, task_future: Pin<Box<dyn Future<Output = R> + Send + Sync >>) -> Self {
+impl<R: OrcaTaskResult> RegisteredTask<R> {
+    pub fn new(name: String, task_future: TaskFuture<R>) -> Self {
         Self { name, task_future }
     }
 }
 
 #[async_trait]
-impl<R: Serialize + Send + Sync + 'static> ErasedOrcaSpawner for OrcaSpawner<R> {
+impl<R: OrcaTaskResult> OrcaSpawner for RegisteredTask<R> {
     fn name(&self) -> String {
         self.name.clone()
     }
 
-    async fn spawn_and_get_recipient(
+    async fn spawn_and_get_orca(
         self: Box<Self>,
-        worker_ref: ActorRef<Worker>
-    ) -> Result<Box<dyn OrcaMessageRecipient>, OrcaError> {
+        id: Uuid,
+        worker_ref: ActorRef<Worker>,
+
+    ) -> Result<Box<dyn SpawnedOrca>, OrcaError> {
         // Create the Orca instance
-        let mut orca = Orca::new(self.name, self.task_future);
+        let mut orca = Orca::new(id,self.name, self.task_future);
         // Set the worker reference before spawning
         orca.worker = Some(worker_ref);
         // Assume Orca::spawn returns ActorRef directly on success
-        let actor_ref = Orca::spawn(orca); // Simplify spawn call
+        let actor_ref = Orca::spawn(orca); 
         // Box the resulting ActorRef as the trait object
         Ok(Box::new(actor_ref))
     }
 }
+
+
 
 #[derive(Debug)]
 pub struct OrcaError(String);
@@ -206,10 +322,7 @@ impl std::fmt::Display for OrcaError {
     }
 }
 
-
-
-
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum OrcaStatesTypes {
     Registered(OrcaState<Registered>),
     Submitted(OrcaState<Submitted>),
@@ -227,21 +340,30 @@ impl std::fmt::Display for OrcaStatesTypes {
 impl OrcaStatesTypes {
     pub fn to_string(&self) -> String {
         match self {
-            OrcaStatesTypes::Registered(state) => "Registered".to_string(),
-            OrcaStatesTypes::Submitted(state) => "Submitted".to_string(),
-            OrcaStatesTypes::Scheduled(state) => "Scheduled".to_string(),
-            OrcaStatesTypes::Running(state) => "Running".to_string(),
-            OrcaStatesTypes::Completed(state) => "Completed".to_string(),  
+            OrcaStatesTypes::Registered(_state) => "Registered".to_string(),
+            OrcaStatesTypes::Submitted(_state) => "Submitted".to_string(),
+            OrcaStatesTypes::Scheduled(_state) => "Scheduled".to_string(),
+            OrcaStatesTypes::Running(_state) => "Running".to_string(),
+            OrcaStatesTypes::Completed(_state) => "Completed".to_string(),  
+        }
+    }
+    pub fn to_orca_state_enum(&self) -> OrcaStates {
+        match self {
+            OrcaStatesTypes::Registered(_) => OrcaStates::Registered,
+            OrcaStatesTypes::Submitted(_) => OrcaStates::Submitted,
+            OrcaStatesTypes::Scheduled(_) => OrcaStates::Scheduled,
+            OrcaStatesTypes::Running(_) => OrcaStates::Running,
+            OrcaStatesTypes::Completed(_) => OrcaStates::Completed,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct OrcaState<S> {
     state: S,
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Registered {
     pub max_retries: u32,
     pub args: Vec<String>,
@@ -253,51 +375,21 @@ impl OrcaState<Registered> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Submitted {
 }
 
-impl From<OrcaState<Registered>> for OrcaState<Submitted> {
-    fn from(state: OrcaState<Registered>) -> Self {
-        OrcaState { state: Submitted {} }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Scheduled {
     pub delay: u64,
 }
 
-impl From<OrcaState<Registered>> for OrcaState<Scheduled> {
-    fn from(state: OrcaState<Registered>) -> Self {
-        OrcaState { state: Scheduled { delay: 0 } }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Running {
 }
 
-impl From<OrcaState<Submitted>> for OrcaState<Running> {
-    fn from(state: OrcaState<Submitted>) -> Self {
-        OrcaState { state: Running {} }
-    }
-}
-
-impl From<OrcaState<Scheduled>> for OrcaState<Running> {
-    fn from(state: OrcaState<Scheduled>) -> Self {
-        OrcaState { state: Running {} }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Completed {
     pub params: Vec<String>,
     pub result: String,
-}
-
-impl From<OrcaState<Running>> for OrcaState<Completed> {
-    fn from(state: OrcaState<Running>) -> Self {
-        OrcaState { state: Completed { params: vec![], result: String::new() } }
-    }
 }

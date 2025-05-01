@@ -1,17 +1,26 @@
 use kameo::prelude::*;
-use uuid::Uuid;
 use serde::{Serialize, Deserialize};
-use crate::task::OrcaError;
-use async_trait::async_trait;
-use crate::worker::Worker;
+use crate::types::OrcaData;
+use uuid::Uuid;
 
-
+// Define StartTask message
+#[derive(Debug, Clone)]
+pub struct RunTask {
+    pub task_name: String,
+}
+pub struct OrcaTaskCompleted {
+    pub result_string: String,
+}
 
 #[derive(Reply)]
 pub struct MatriarchReply  {
     pub success: bool,
 }
 
+#[derive(Reply, Debug, Clone)]
+pub struct GetOrcaFieldReply {
+    pub field: OrcaData,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MatriarchMessage<M> {
@@ -28,10 +37,9 @@ pub enum OrcaStates {
     Scheduled,
     Registered,
 }
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct OrcaRequest {
-    pub task_id: String,
+pub struct TransitionState {
+    pub task_id: Uuid,
     pub new_state: OrcaStates,
 }
 
@@ -49,29 +57,3 @@ pub enum MessageType {
     Processor,
 }
 
-/// Trait for message recipients (running Orca tasks) stored by the Worker.
-#[async_trait]
-pub trait OrcaMessageRecipient: Send + Sync {
-    /// Handles forwarding of MatriarchMessage<OrcaRequest>.
-    /// Assumes the reply MatriarchReply is needed. Use ask semantics.
-    async fn forward_matriarch_request(
-        &self,
-        message: MatriarchMessage<OrcaRequest>,
-    ) -> Result<MatriarchReply, OrcaError>;
-    // Add other message types the Worker needs to forward here...
-}
-
-/// Trait for spawning Orca<R> actors without the Worker knowing R.
-#[async_trait]
-pub trait ErasedOrcaSpawner: Send + Sync {
-    /// Returns the name of the task to be spawned.
-    fn name(&self) -> String;
-
-    /// Spawns the specific Orca<R> actor.
-    /// Takes ownership of self and the Worker's ActorRef.
-    /// Returns a Box<dyn OrcaMessageRecipient> for the spawned actor.
-    async fn spawn_and_get_recipient(
-        self: Box<Self>,
-        worker_ref: ActorRef<Worker>
-    ) -> Result<Box<dyn OrcaMessageRecipient>, OrcaError>; // Use OrcaError from task.rs
-}

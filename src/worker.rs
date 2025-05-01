@@ -1,32 +1,20 @@
 use uuid::Uuid;
 use std::collections::HashMap;
 use crate::processors::redis::Processor;
-use crate::task::OrcaSpawner;
-
-use crate::messages::{MatriarchMessage, MatriarchReply, OrcaRequest, ActorType, OrcaStates, ErasedOrcaSpawner, OrcaMessageRecipient};
+use crate::task::{OrcaSpawner, RegisteredTask};
+use crate::messages::*;
+use crate::types::OrcaTaskResult;
 use kameo::prelude::*;
-use std::future::Future;
-use std::pin::Pin;
-use serde::Serialize;
-
-
-// Worker for running jobs inside of worker threads. Each worker thread is a consumer and keeps its last
-// read position in the log. 
-
-
+use crate::task::SpawnedOrca;
+use crate::types::TaskFuture;
 pub struct Worker {
     id: Uuid,
     url: String,
-    pub registered_tasks: HashMap<String, Box<dyn ErasedOrcaSpawner>>,
-    pub running_tasks: HashMap<String, Box<dyn OrcaMessageRecipient>>,
+    pub registered_tasks: HashMap<String, Box<dyn OrcaSpawner>>,
+    pub running_tasks: HashMap<Uuid, Box<dyn SpawnedOrca>>,
     processor: Option<ActorRef<Processor>>,
 } 
 
-// Define StartTask message
-#[derive(Debug, Clone)]
-pub struct StartTask {
-    pub task_name: String,
-}
 
 impl Worker {
     pub fn new(url: String) -> Self {
@@ -40,11 +28,11 @@ impl Worker {
         }
     }   
 
-    pub fn register_task<R>(&mut self, name: String, task_future: Pin<Box<dyn Future<Output = R> + Send + Sync >>) -> &mut Self 
+    pub fn register_task<R>(&mut self, name: String, task_future: TaskFuture<R>) -> &mut Self 
     where 
-        R: Serialize + Send + Sync + 'static,
+        R: OrcaTaskResult,
     {
-        let spawner = Box::new(OrcaSpawner::new(name.clone(), task_future));
+        let spawner = Box::new(RegisteredTask::new(name.clone(), task_future));
         self.registered_tasks.insert(name, spawner);
         self
     }
@@ -64,13 +52,13 @@ impl Actor for Worker {
     }
 }
 
-impl Message<MatriarchMessage<OrcaRequest>> for Worker {
+impl Message<MatriarchMessage<TransitionState>> for Worker {
     type Reply = MatriarchReply;
 
     async fn handle(
         &mut self,
-        message: MatriarchMessage<OrcaRequest>,
-        ctx: &mut Context<Self, Self::Reply>
+        message: MatriarchMessage<TransitionState>,
+        _ctx: &mut Context<Self, Self::Reply>
     ) -> Self::Reply {
         match message.recipient {
             ActorType::Processor => {
@@ -109,24 +97,34 @@ impl Message<MatriarchMessage<OrcaRequest>> for Worker {
 }
 
 // --- Implement Handler for StartTask ---
-impl Message<StartTask> for Worker {
+impl Message<RunTask> for Worker {
     // Reply indicates success/failure of starting
     type Reply = Result<(), WorkerError>; 
 
     async fn handle(
         &mut self,
-        message: StartTask,
+        message: RunTask,
         ctx: &mut Context<Self, Self::Reply>
     ) -> Self::Reply {
         let name = &message.task_name;
         println!("Attempting to start task: {}", name);
         if let Some(spawner) = self.registered_tasks.remove(name) {
             // Get self actor ref from context
-            let self_actor_ref = ctx.actor_ref();
-            match spawner.spawn_and_get_recipient(self_actor_ref).await {
+            
+            let worker_ref = ctx.actor_ref();
+            let id = Uuid::new_v4();  
+            match spawner.spawn_and_get_orca(id, worker_ref).await {
                 Ok(recipient) => {
                     println!("Successfully spawned task: {}", name);
-                    self.running_tasks.insert(name.to_string(), recipient);
+                    let _ = self.processor.as_ref().unwrap().tell(MatriarchMessage {
+                        message: TransitionState {
+                            task_id: id,
+                            new_state: OrcaStates::Running,
+                        },
+                        recipient: ActorType::Orca,
+                    }).await;
+                    self.running_tasks.insert(id, recipient);
+
                     Ok(())
                 }
                 Err(e) => {

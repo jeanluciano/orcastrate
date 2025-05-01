@@ -1,7 +1,10 @@
+#![feature(trait_alias)]
+
 pub mod task;
 pub mod worker;
 pub mod processors;
 pub mod messages;
+pub mod types;
 
 #[cfg(test)]
 mod tests {

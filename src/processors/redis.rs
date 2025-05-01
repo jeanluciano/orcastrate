@@ -6,9 +6,8 @@ use redis::{RedisResult,RedisError};
 use redis::streams::{StreamReadOptions,StreamReadReply};
 use uuid::Uuid;
 use kameo::Actor;
-use crate::worker::{Worker};
-use crate::messages::{MatriarchMessage, MatriarchReply, OrcaRequest, OrcaStates, ActorType};
-use crate::task::{Orca};
+use crate::worker::Worker;
+use crate::messages::*;
 
 const TASK_RUN_STREAM_KEY: &str = "orca:streams:tasks:run";
 const TASK_SCHEDULED_STREAM_KEY: &str = "orca:streams:tasks:scheduled";
@@ -25,20 +24,23 @@ pub struct Processor{
 
 
 
-impl Message<MatriarchMessage<OrcaRequest>> for Processor {
+impl Message<MatriarchMessage<TransitionState>> for Processor {
     type Reply = MatriarchReply;
 
     async fn handle(
         &mut self,
-        message: MatriarchMessage<OrcaRequest>,
+        message: MatriarchMessage<TransitionState>,
         _ctx: &mut Context<Self,Self::Reply>,
     ) -> Self::Reply {
         println!("Processor received task request: {:?}", message.message.task_id);
         match  message.message.new_state {
             OrcaStates::Running => {
+                println!("Processor received running state: {:?}", message.message.task_id);
                 self.write(message.message).await;
             }
-            _ => {}
+            _ => {
+                println!("Processor received unknown state: {:?}", message.message.task_id);
+            }
         }
         MatriarchReply { success: true }
     }
@@ -97,8 +99,8 @@ impl Processor{
                         println!("{}", message.id);
                         let vals =  &message.map;
                         self.worker.ask(MatriarchMessage{
-                            message: OrcaRequest{
-                                task_id: "test".to_string(),
+                            message: TransitionState{
+                                task_id: Uuid::new_v4(),
                                 new_state: OrcaStates::Running,
                             },
                             recipient: ActorType::Orca,
@@ -109,7 +111,7 @@ impl Processor{
         }
     }
 
-    pub async fn write(&mut self, message: OrcaRequest) {
+    pub async fn write(&mut self, message: TransitionState) {
         println!("Processor received message: {:?}", message);
         let new_state = match message.new_state {
             OrcaStates::Running => "Running",
@@ -119,8 +121,8 @@ impl Processor{
             OrcaStates::Scheduled => "Scheduled",
             OrcaStates::Registered => "Registered",
         };
-        let key_values: &[(&str, &str)] = &[("task_id", &message.task_id), ("new_state", &new_state)];
-        self.redis
+        let key_values: &[(&str, &str)] = &[("task_id", &message.task_id.to_string()), ("new_state", &new_state)];
+        let _ = self.redis
             .xadd::<&str,&str, &str, &str,String>(TASK_RUN_STREAM_KEY, "*", &key_values)
             .await;
     }
@@ -129,7 +131,7 @@ impl Processor{
 impl Actor for Processor{
     type Args = Self;   
     type Error = RedisError;
-    async fn on_start(args: Self::Args, actor_ref: ActorRef<Self>) -> Result<Self, RedisError> {
+    async fn on_start(args: Self::Args, _actor_ref: ActorRef<Self>) -> Result<Self, RedisError> {
         println!("Processor starting");
         let mut args = args;
         args.process_loop().await;
