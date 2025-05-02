@@ -7,6 +7,8 @@ use crate::types::OrcaTaskResult;
 use kameo::prelude::*;
 use crate::task::SpawnedOrca;
 use crate::types::TaskFuture;
+use tracing::info;
+
 pub struct Worker {
     id: Uuid,
     url: String,
@@ -14,7 +16,6 @@ pub struct Worker {
     pub running_tasks: HashMap<Uuid, Box<dyn SpawnedOrca>>,
     processor: Option<ActorRef<Processor>>,
 } 
-
 
 impl Worker {
     pub fn new(url: String) -> Self {
@@ -38,14 +39,12 @@ impl Worker {
     }
 } 
 
-
-
 impl Actor for Worker {
     type Args = Self;
     type Error = WorkerError;
 
     async fn on_start(mut args: Self::Args, actor_ref: ActorRef<Self>) -> Result<Self, WorkerError>  {
-        println!("Worker starting: {}", args.id);
+        info!("Worker starting: {}", args.id);
         let processor = Processor::spawn(Processor::new(args.id, &args.url, actor_ref).await);
         args.processor = Some(processor);
         Ok(args)
@@ -62,7 +61,7 @@ impl Message<MatriarchMessage<TransitionState>> for Worker {
     ) -> Self::Reply {
         match message.recipient {
             ActorType::Processor => {
-                println!("Handling Processor request for task: {}", message.message.task_id);
+                info!("→ → {}:{} → → ", message.message.task_id, message.message.new_state.to_string());
                 if let Some(proc) = &self.processor {
                     match proc.ask(message).await {
                         Ok(reply) => reply,
@@ -78,7 +77,7 @@ impl Message<MatriarchMessage<TransitionState>> for Worker {
             }
             ActorType::Orca => {
                 let task_id_clone = message.message.task_id.clone(); 
-                println!("Handling Orca request for task: {}", task_id_clone);
+                info!("← ← {}:{} ← ← ", task_id_clone, message.message.new_state.to_string());
                 if let Some(recipient) = self.running_tasks.get(&task_id_clone) {
                     match recipient.forward_matriarch_request(message).await {
                         Ok(reply) => reply,
@@ -96,6 +95,34 @@ impl Message<MatriarchMessage<TransitionState>> for Worker {
     }
 }
 
+
+
+impl Message<SubmitTask> for Worker {
+    type Reply = Result<(), WorkerError>;
+
+    async fn handle(
+        &mut self,
+        message: SubmitTask,
+        _ctx: &mut Context<Self, Self::Reply>
+    ) -> Self::Reply {
+        let task_id = Uuid::new_v4();
+        if let Some(_orca) = self.registered_tasks.get_mut(&message.task_name) {
+            info!("Submitting task: {}:{}", message.task_name, task_id);
+            let res = self.processor.as_ref().unwrap().ask(MatriarchMessage {
+                message: TransitionState {
+                    task_name: message.task_name,
+                    task_id: task_id,
+                    new_state: OrcaStates::Submitted,
+                },
+                recipient: ActorType::Processor,
+            }).await;
+            Ok(())
+        } else {
+            Err(WorkerError(format!("Task {} not registered", message.task_name)))
+        }
+    }
+}
+
 // --- Implement Handler for StartTask ---
 impl Message<RunTask> for Worker {
     // Reply indicates success/failure of starting
@@ -107,24 +134,23 @@ impl Message<RunTask> for Worker {
         ctx: &mut Context<Self, Self::Reply>
     ) -> Self::Reply {
         let name = &message.task_name;
-        println!("Attempting to start task: {}", name);
+
         if let Some(spawner) = self.registered_tasks.remove(name) {
             // Get self actor ref from context
-            
+            let id = message.task_id;
             let worker_ref = ctx.actor_ref();
-            let id = Uuid::new_v4();  
             match spawner.spawn_and_get_orca(id, worker_ref).await {
                 Ok(recipient) => {
-                    println!("Successfully spawned task: {}", name);
+ 
+                    self.running_tasks.insert(id, recipient);
                     let _ = self.processor.as_ref().unwrap().tell(MatriarchMessage {
                         message: TransitionState {
+                            task_name: name.clone(),
                             task_id: id,
                             new_state: OrcaStates::Running,
                         },
                         recipient: ActorType::Orca,
                     }).await;
-                    self.running_tasks.insert(id, recipient);
-
                     Ok(())
                 }
                 Err(e) => {

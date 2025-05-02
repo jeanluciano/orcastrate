@@ -1,9 +1,18 @@
 use kameo::prelude::*;
 use orcastra::worker::{Worker};
 use orcastra::messages::*;
+use tracing_subscriber;
+use tracing::info;
+
 
 #[tokio::main]
 async fn main() {
+
+    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+        .compact()
+        .finish();
+    
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
     let redis_url = "redis://localhost:6379";
 
     
@@ -34,22 +43,21 @@ async fn main() {
     });
     worker.register_task(task2_name.clone(), task2_future);
    
-    println!("Spawning Worker actor...");
+
     let worker_actor = Worker::spawn(worker);
     println!("Worker actor spawned: {:?}", worker_actor.id());
+    worker_actor.wait_for_startup().await;
 
-    
-    println!("Sending StartTask message for: {}", task1_name);
-    let start_msg1 = RunTask { task_name: task1_name };
+    let start_msg1 = SubmitTask { task_name: task1_name };
     match worker_actor.ask(start_msg1).await {
-        Ok(_) => println!("Successfully started StringTask"),
-        Err(e) => eprintln!("Actor communication error starting StringTask: {}", e),
+        Ok(_) => println!("main submitted StringTask"),
+        Err(e) => eprintln!("Actor communication error submitting StringTask: {}", e),
     }
-    println!("Sending StartTask message for: {}", task2_name);
-    let start_msg2 = RunTask { task_name: task2_name };
+ 
+    let start_msg2 = SubmitTask { task_name: task2_name };
     match worker_actor.ask(start_msg2).await {
-        Ok(_) => println!("Successfully started IntegerTask"),
-        Err(e) => eprintln!("Actor communication error starting IntegerTask: {}", e),
+        Ok(_) => println!("main submitted IntegerTask"),
+        Err(e) => eprintln!("Actor communication error submitting IntegerTask: {}", e),
     }
     
     println!("Main loop running. Tasks are executing asynchronously...");

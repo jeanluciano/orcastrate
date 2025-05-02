@@ -7,12 +7,19 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct RunTask {
     pub task_name: String,
+    pub task_id: Uuid,
 }
+
+#[derive(Debug, Clone)]
+pub struct SubmitTask {
+    pub task_name: String,
+}
+
 pub struct OrcaTaskCompleted {
     pub result_string: String,
 }
 
-#[derive(Reply)]
+#[derive(Reply, Debug, Clone)]
 pub struct MatriarchReply  {
     pub success: bool,
 }
@@ -35,10 +42,32 @@ pub enum OrcaStates {
     Failed,
     Submitted,
     Scheduled,
-    Registered,
+}
+
+impl OrcaStates {
+    pub fn from_string(s: &str) -> Option<OrcaStates> {
+        match s {
+            "Running" => Some(OrcaStates::Running),
+            "Completed" => Some(OrcaStates::Completed),
+            "Failed" => Some(OrcaStates::Failed),
+            "Submitted" => Some(OrcaStates::Submitted),
+            "Scheduled" => Some(OrcaStates::Scheduled),
+            _ => None,
+        }
+    }
+    pub fn to_string(&self) -> String {
+        match self {
+            OrcaStates::Running => "Running".to_string(),
+            OrcaStates::Completed => "Completed".to_string(),
+            OrcaStates::Failed => "Failed".to_string(),
+            OrcaStates::Submitted => "Submitted".to_string(),
+            OrcaStates::Scheduled => "Scheduled".to_string(),
+        }
+    }
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransitionState {
+    pub task_name: String,
     pub task_id: Uuid,
     pub new_state: OrcaStates,
 }

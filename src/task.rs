@@ -6,7 +6,7 @@ use tokio::task::JoinHandle;
 use serde_json;
 use async_trait::async_trait;
 use crate::types::*;
-
+use tracing::info;
 pub struct Orca<R: OrcaTaskResult> {
     pub id: Uuid,
     pub name: String,
@@ -19,10 +19,10 @@ pub struct Orca<R: OrcaTaskResult> {
 
 impl<R: OrcaTaskResult> Orca<R> {
     pub fn new(id: Uuid, name: String, task_future: TaskFuture<R>) -> Self {
-        let state = OrcaState::<Registered>::new(0, vec![]);
+        let state = OrcaState::<Submitted>::new(0, vec![]);
         Self {
             id, 
-            state: OrcaStatesTypes::Registered(state),
+            state: OrcaStatesTypes::Submitted(state),
             params: vec![],
             worker: None,
             name: name,
@@ -31,10 +31,10 @@ impl<R: OrcaTaskResult> Orca<R> {
         }
     }
     pub async fn submit(&self) {
-        println!("Task submitted: {}", self.id);
         if let Some(worker) = &self.worker {
             let result = worker.tell(MatriarchMessage {
                 message: TransitionState {
+                    task_name: self.name.clone(),
                     task_id: self.id,
                     new_state: OrcaStates::Submitted,
                 },
@@ -54,12 +54,9 @@ impl<R: OrcaTaskResult> Orca<R> {
     }
 
     async fn transition_to_state(&mut self, new_state_request: OrcaStates) -> Result<(), OrcaError> {
-        println!("Task {} attempting transition to {:?}", self.id, new_state_request);
+        
 
         let next_state_type = match (&self.state, new_state_request) {
-            (OrcaStatesTypes::Registered(_), OrcaStates::Submitted) => {
-                Ok(OrcaStatesTypes::Submitted(OrcaState { state: Submitted {} }))
-            },
             (OrcaStatesTypes::Submitted(_), OrcaStates::Running) => {
                  Ok(OrcaStatesTypes::Running(OrcaState { state: Running {} }))
             }
@@ -85,11 +82,12 @@ impl<R: OrcaTaskResult> Orca<R> {
             Ok(next_state) => {
                 self.state = next_state;
                 let current_state_enum = self.state.to_orca_state_enum();
-                println!("Task {} state updated to {}", self.id, self.state);
 
+                info!("{}:{} → → → {}:{}", self.id, self.state.to_string(),self.id, current_state_enum.to_string());
                 if let Some(worker) = &self.worker {
                     let _ = worker.tell(MatriarchMessage {
                         message: TransitionState {
+                            task_name: self.name.clone(),
                             task_id: self.id,
                             new_state: current_state_enum,
                         },
@@ -115,17 +113,14 @@ impl<R: OrcaTaskResult> Actor for Orca<R> {
     type Error = OrcaError;
 
     async fn on_start(mut args: Self::Args, actor_ref: ActorRef<Orca<R>>) -> Result<Self, OrcaError> {
-        println!("Task starting: {}", args.id);
-
-        
-
+    
         if let Some(task_future) = args.task.take() {
             let self_ref = actor_ref.clone();
             let task_id = args.id.clone();
             let handle = tokio::spawn(async move {
-                println!("Executing future for task {}", task_id);
+                info!("Executing future for task {}", task_id);
                 let result: R = task_future.await;
-                println!("Future completed for task {}", task_id);
+                info!("Future completed for task {}", task_id);
 
                 let result_string = match serde_json::to_string(&result) {
                     Ok(s) => s,
@@ -149,7 +144,7 @@ impl<R: OrcaTaskResult> Actor for Orca<R> {
     }
 
     async fn on_stop(&mut self, _actor_ref: WeakActorRef<Orca<R>>, _reason: ActorStopReason) -> Result<(), OrcaError> {
-        println!("Task stopping: {}", self.id);
+        info!("Task stopping: {}", self.id);
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
@@ -171,10 +166,10 @@ impl<R: OrcaTaskResult> Message<GetField> for Orca<R> {
         _ctx: &mut Context<Orca<R>, Self::Reply>,
     ) -> Self::Reply {
         match _message.field {
-            OrcaData::Id(id) => GetOrcaFieldReply { field: OrcaData::Id(self.id) },
-            OrcaData::Name(name) => GetOrcaFieldReply { field: OrcaData::Name(self.name.clone()) },
-            OrcaData::State(state) => GetOrcaFieldReply { field: OrcaData::State(self.state.clone()) },
-            OrcaData::Params(params) => GetOrcaFieldReply { field: OrcaData::Params(self.params.clone()) },
+            OrcaData::Id(_id) => GetOrcaFieldReply { field: OrcaData::Id(self.id) },
+            OrcaData::Name(_name) => GetOrcaFieldReply { field: OrcaData::Name(self.name.clone()) },
+            OrcaData::State(_state) => GetOrcaFieldReply { field: OrcaData::State(self.state.clone()) },
+            OrcaData::Params(_params) => GetOrcaFieldReply { field: OrcaData::Params(self.params.clone()) },
         }
     }
 }
@@ -186,9 +181,7 @@ impl<R: OrcaTaskResult> Message<MatriarchMessage<TransitionState>> for Orca<R> {
         &mut self,
         message: MatriarchMessage<TransitionState>,
         _ctx: &mut Context<Orca<R>, MatriarchReply>,
-    ) -> Self::Reply {
-        println!("Task {} received MatriarchMessage for state: {:?}", self.id, message.message.new_state);
-        
+    ) -> Self::Reply {        
         match self.transition_to_state(message.message.new_state).await {
             Ok(_) => MatriarchReply { success: true },
             Err(e) => {
@@ -207,13 +200,11 @@ impl<R: OrcaTaskResult> Message<OrcaTaskCompleted> for Orca<R> {
         message: OrcaTaskCompleted,
         _ctx: &mut Context<Orca<R>, Self::Reply>,
     ) -> Self::Reply {
-        println!("Task {} received internal completion", self.id);
-        
         match self.transition_to_state(OrcaStates::Completed).await {
             Ok(_) => {
                 if let OrcaStatesTypes::Completed(ref mut completed_state) = self.state {
                      completed_state.state.result = message.result_string;
-                     println!("Task {} result updated in Completed state", self.id);
+                     info!("{}:{} → → → {}:{}", self.id, self.state.to_string(),self.id, OrcaStates::Completed.to_string());
                 } else {
                      eprintln!("Task {} is not in Completed state after successful transition attempt!", self.id);
                 }
@@ -300,7 +291,6 @@ impl<R: OrcaTaskResult> OrcaSpawner for RegisteredTask<R> {
         worker_ref: ActorRef<Worker>,
 
     ) -> Result<Box<dyn SpawnedOrca>, OrcaError> {
-        // Create the Orca instance
         let mut orca = Orca::new(id,self.name, self.task_future);
         // Set the worker reference before spawning
         orca.worker = Some(worker_ref);
@@ -324,7 +314,6 @@ impl std::fmt::Display for OrcaError {
 
 #[derive(Debug,Clone)]
 pub enum OrcaStatesTypes {
-    Registered(OrcaState<Registered>),
     Submitted(OrcaState<Submitted>),
     Scheduled(OrcaState<Scheduled>),
     Running(OrcaState<Running>),
@@ -340,7 +329,6 @@ impl std::fmt::Display for OrcaStatesTypes {
 impl OrcaStatesTypes {
     pub fn to_string(&self) -> String {
         match self {
-            OrcaStatesTypes::Registered(_state) => "Registered".to_string(),
             OrcaStatesTypes::Submitted(_state) => "Submitted".to_string(),
             OrcaStatesTypes::Scheduled(_state) => "Scheduled".to_string(),
             OrcaStatesTypes::Running(_state) => "Running".to_string(),
@@ -349,7 +337,6 @@ impl OrcaStatesTypes {
     }
     pub fn to_orca_state_enum(&self) -> OrcaStates {
         match self {
-            OrcaStatesTypes::Registered(_) => OrcaStates::Registered,
             OrcaStatesTypes::Submitted(_) => OrcaStates::Submitted,
             OrcaStatesTypes::Scheduled(_) => OrcaStates::Scheduled,
             OrcaStatesTypes::Running(_) => OrcaStates::Running,
@@ -363,20 +350,17 @@ pub struct OrcaState<S> {
     state: S,
 }
 
+
 #[derive(Debug,Clone)]
-pub struct Registered {
+pub struct Submitted {
     pub max_retries: u32,
     pub args: Vec<String>,
 }
 
-impl OrcaState<Registered> {
+impl OrcaState<Submitted> {
     pub fn new(max_retries: u32, args: Vec<String>) -> Self {
-        Self { state: Registered { max_retries, args } }
+        Self { state: Submitted { max_retries, args } }
     }
-}
-
-#[derive(Debug,Clone)]
-pub struct Submitted {
 }
 
 #[derive(Debug,Clone)]
