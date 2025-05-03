@@ -1,8 +1,7 @@
-use kameo::prelude::*;
-use serde::{Serialize, Deserialize};
 use crate::types::TaskData;
+use kameo::prelude::*;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::task::RunState;
 
 // Define StartTask message
 #[derive(Debug, Clone)]
@@ -27,7 +26,7 @@ pub struct TaskCompleted {
 }
 
 #[derive(Reply, Debug, Clone)]
-pub struct MatriarchReply  {
+pub struct MatriarchReply {
     pub success: bool,
 }
 
@@ -42,7 +41,7 @@ pub struct MatriarchMessage<M> {
     pub recipient: ActorType,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum OrcaStates {
     Running,
     Completed,
@@ -62,7 +61,7 @@ impl OrcaStates {
             _ => None,
         }
     }
-    pub fn to_string(&self) -> String {
+    pub fn display(&self) -> String {
         match self {
             OrcaStates::Running => "Running".to_string(),
             OrcaStates::Completed => "Completed".to_string(),
@@ -79,7 +78,6 @@ pub struct TransitionState {
     pub new_state: OrcaStates,
 }
 
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ActorType {
     Orca,
@@ -88,8 +86,6 @@ pub enum ActorType {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum MessageType {
-
     Worker,
     Processor,
 }
-

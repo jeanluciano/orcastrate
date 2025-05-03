@@ -42,7 +42,27 @@ Orcastra is a Proof-of-Concept (PoC) job queue designed for processing tasks (ca
 
 ## Getting Started
 
-_(Instructions on how to set up and run the PoC will go here.)_
+This project requires Rust **nightly** and a running **Redis** instance.
+
+1.  **Install/Switch to Nightly Toolchain:**
+    If you don't have it, install `rustup` first. Then, in the project directory, run:
+    ```bash
+    rustup override set nightly
+    ```
+
+2.  **Start Redis:**
+    The simplest way is using Docker:
+    ```bash
+    docker run -d --name orcastra-redis -p 6379:6379 redis
+    ```
+    Ensure Redis is running on the default port (`6379`) at `localhost`.
+
+3.  **Run the Project:**
+    Execute the main example using Cargo:
+    ```bash
+    cargo run
+    ```
+    This will compile and run the example tasks defined in `src/main.rs`. You should see output indicating task submission and processing via Redis streams.
 
 ## Contributing
 
