@@ -50,6 +50,19 @@ pub enum OrcaStates {
     Scheduled,
 }
 
+// Implement the Display trait
+impl std::fmt::Display for OrcaStates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrcaStates::Running => write!(f, "Running"),
+            OrcaStates::Completed => write!(f, "Completed"),
+            OrcaStates::Failed => write!(f, "Failed"),
+            OrcaStates::Submitted => write!(f, "Submitted"),
+            OrcaStates::Scheduled => write!(f, "Scheduled"),
+        }
+    }
+}
+
 impl OrcaStates {
     pub fn from_string(s: &str) -> Option<OrcaStates> {
         match s {
@@ -61,16 +74,8 @@ impl OrcaStates {
             _ => None,
         }
     }
-    pub fn display(&self) -> String {
-        match self {
-            OrcaStates::Running => "Running".to_string(),
-            OrcaStates::Completed => "Completed".to_string(),
-            OrcaStates::Failed => "Failed".to_string(),
-            OrcaStates::Submitted => "Submitted".to_string(),
-            OrcaStates::Scheduled => "Scheduled".to_string(),
-        }
-    }
 }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransitionState {
     pub task_name: String,

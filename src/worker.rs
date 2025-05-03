@@ -65,8 +65,7 @@ impl Message<MatriarchMessage<TransitionState>> for Worker {
             ActorType::Processor => {
                 info!(
                     "→ → {}:{} → → ",
-                    message.message.task_id,
-                    message.message.new_state.display()
+                    message.message.task_id, message.message.new_state
                 );
                 if let Some(proc) = &self.processor {
                     match proc.ask(message).await {
@@ -86,11 +85,7 @@ impl Message<MatriarchMessage<TransitionState>> for Worker {
             }
             ActorType::Orca => {
                 let task_id = message.message.task_id;
-                info!(
-                    "← ← {}:{} ← ← ",
-                    task_id,
-                    message.message.new_state.display()
-                );
+                info!("← ← {}:{} ← ← ", task_id, message.message.new_state);
                 if let Some(recipient) = self.running_tasks.get(&task_id) {
                     match recipient.forward_matriarch_request(message).await {
                         Ok(reply) => reply,
