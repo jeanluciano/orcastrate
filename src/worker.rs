@@ -1,19 +1,19 @@
 use uuid::Uuid;
 use std::collections::HashMap;
 use crate::processors::redis::Processor;
-use crate::task::{OrcaSpawner, RegisteredTask};
+use crate::task::{RegisteredTask, TaskRunner, TaskHandle};
 use crate::messages::*;
-use crate::types::OrcaTaskResult;
+use crate::types::TaskResult;
 use kameo::prelude::*;
-use crate::task::SpawnedOrca;
+use crate::task::Run;
 use crate::types::TaskFuture;
 use tracing::info;
 
 pub struct Worker {
     id: Uuid,
     url: String,
-    pub registered_tasks: HashMap<String, Box<dyn OrcaSpawner>>,
-    pub running_tasks: HashMap<Uuid, Box<dyn SpawnedOrca>>,
+    pub registered_tasks: HashMap<String, Box<dyn TaskRunner>>,
+    pub running_tasks: HashMap<Uuid, Box<dyn Run>>,
     processor: Option<ActorRef<Processor>>,
 } 
 
@@ -29,13 +29,13 @@ impl Worker {
         }
     }   
 
-    pub fn register_task<R>(&mut self, name: String, task_future: TaskFuture<R>) -> &mut Self 
+    pub fn register_task<R>(&mut self, task: RegisteredTask<R>)
     where 
-        R: OrcaTaskResult,
+        R: TaskResult,
     {
-        let spawner = Box::new(RegisteredTask::new(name.clone(), task_future));
-        self.registered_tasks.insert(name, spawner);
-        self
+        let name = task.name.clone();
+        self.registered_tasks.insert(name, Box::new(task));
+
     }
 } 
 
@@ -95,7 +95,27 @@ impl Message<MatriarchMessage<TransitionState>> for Worker {
     }
 }
 
+pub struct RegisterTask<R> {
+    pub task_name: String,
+    pub task_future: TaskFuture<R>,
+}
 
+
+impl<R: TaskResult> Message<RegisterTask<R>> for Worker {
+    type Reply = Result<TaskHandle, WorkerError>;
+
+    async fn handle(
+        &mut self,
+        message: RegisterTask<R>,
+        ctx: &mut Context<Self, Self::Reply>
+    ) -> Self::Reply {
+        let task_name = message.task_name.clone();
+        let worker_ref = ctx.actor_ref();
+        let task = RegisteredTask::new(task_name.clone(), message.task_future, worker_ref.clone());
+        self.register_task(task);
+        Ok(TaskHandle { name: task_name, worker_ref: worker_ref.clone() })
+    }
+}
 
 impl Message<SubmitTask> for Worker {
     type Reply = Result<(), WorkerError>;
@@ -139,7 +159,7 @@ impl Message<RunTask> for Worker {
             // Get self actor ref from context
             let id = message.task_id;
             let worker_ref = ctx.actor_ref();
-            match spawner.spawn_and_get_orca(id, worker_ref).await {
+            match spawner.run(id, worker_ref).await {
                 Ok(recipient) => {
  
                     self.running_tasks.insert(id, recipient);

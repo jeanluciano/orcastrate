@@ -1,7 +1,8 @@
 use kameo::prelude::*;
 use serde::{Serialize, Deserialize};
-use crate::types::OrcaData;
+use crate::types::TaskData;
 use uuid::Uuid;
+use crate::task::RunState;
 
 // Define StartTask message
 #[derive(Debug, Clone)]
@@ -15,7 +16,13 @@ pub struct SubmitTask {
     pub task_name: String,
 }
 
-pub struct OrcaTaskCompleted {
+#[derive(Debug, Clone)]
+pub struct ScheduleTask {
+    pub task_name: String,
+    pub scheduled_at: u64,
+}
+
+pub struct TaskCompleted {
     pub result_string: String,
 }
 
@@ -26,7 +33,7 @@ pub struct MatriarchReply  {
 
 #[derive(Reply, Debug, Clone)]
 pub struct GetOrcaFieldReply {
-    pub field: OrcaData,
+    pub field: TaskData,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

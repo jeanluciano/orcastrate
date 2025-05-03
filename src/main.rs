@@ -1,25 +1,24 @@
 use kameo::prelude::*;
-use orcastra::worker::{Worker};
 use orcastra::messages::*;
+use orcastra::worker::Worker;
+use orcastra::worker::RegisterTask;
 use tracing_subscriber;
-use tracing::info;
-
 
 #[tokio::main]
 async fn main() {
-
     let subscriber = tracing_subscriber::fmt::Subscriber::builder()
         .compact()
         .finish();
-    
+
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
     let redis_url = "redis://localhost:6379";
 
-    
     let mut worker = Worker::new(redis_url.to_string());
-    
+    let worker_actor = Worker::spawn(worker);
+    worker_actor.wait_for_startup().await;
+
     let task_variable = "TaskVariable".to_string();
-    
+
     let task1_name = "StringTask".to_string();
     let task1_future = Box::pin(async move {
         println!("StringTask starting...");
@@ -28,10 +27,11 @@ async fn main() {
         println!("StringTask finished!");
         "Hello from StringTask!".to_string()
     });
-    worker.register_task(task1_name.clone(), task1_future);
-    println!("Registered task: {}", task1_name);
 
-
+    let task1 = worker_actor.ask(RegisterTask {
+        task_name: task1_name.clone(),
+        task_future: task1_future,
+    }).await.unwrap();
 
     let task2_name = "IntegerTask".to_string();
     let task2_future = Box::pin(async move {
@@ -41,25 +41,15 @@ async fn main() {
         println!("IntegerTask finished!");
         result
     });
-    worker.register_task(task2_name.clone(), task2_future);
-   
+    let task2 = worker_actor.ask(RegisterTask {
+        task_name: task2_name.clone(),
+        task_future: task2_future,
+    }).await.unwrap();
 
-    let worker_actor = Worker::spawn(worker);
-    println!("Worker actor spawned: {:?}", worker_actor.id());
-    worker_actor.wait_for_startup().await;
 
-    let start_msg1 = SubmitTask { task_name: task1_name };
-    match worker_actor.ask(start_msg1).await {
-        Ok(_) => println!("main submitted StringTask"),
-        Err(e) => eprintln!("Actor communication error submitting StringTask: {}", e),
-    }
- 
-    let start_msg2 = SubmitTask { task_name: task2_name };
-    match worker_actor.ask(start_msg2).await {
-        Ok(_) => println!("main submitted IntegerTask"),
-        Err(e) => eprintln!("Actor communication error submitting IntegerTask: {}", e),
-    }
-    
+    task1.submit().await;
+    task2.submit().await;
+
     println!("Main loop running. Tasks are executing asynchronously...");
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
