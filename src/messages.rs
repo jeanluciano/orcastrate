@@ -1,8 +1,7 @@
-use kameo::prelude::*;
-use serde::{Serialize, Deserialize};
 use crate::types::TaskData;
+use kameo::prelude::*;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::task::RunState;
 
 // Define StartTask message
 #[derive(Debug, Clone)]
@@ -27,7 +26,7 @@ pub struct TaskCompleted {
 }
 
 #[derive(Reply, Debug, Clone)]
-pub struct MatriarchReply  {
+pub struct MatriarchReply {
     pub success: bool,
 }
 
@@ -42,13 +41,26 @@ pub struct MatriarchMessage<M> {
     pub recipient: ActorType,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum OrcaStates {
     Running,
     Completed,
     Failed,
     Submitted,
     Scheduled,
+}
+
+// Implement the Display trait
+impl std::fmt::Display for OrcaStates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrcaStates::Running => write!(f, "Running"),
+            OrcaStates::Completed => write!(f, "Completed"),
+            OrcaStates::Failed => write!(f, "Failed"),
+            OrcaStates::Submitted => write!(f, "Submitted"),
+            OrcaStates::Scheduled => write!(f, "Scheduled"),
+        }
+    }
 }
 
 impl OrcaStates {
@@ -62,23 +74,14 @@ impl OrcaStates {
             _ => None,
         }
     }
-    pub fn to_string(&self) -> String {
-        match self {
-            OrcaStates::Running => "Running".to_string(),
-            OrcaStates::Completed => "Completed".to_string(),
-            OrcaStates::Failed => "Failed".to_string(),
-            OrcaStates::Submitted => "Submitted".to_string(),
-            OrcaStates::Scheduled => "Scheduled".to_string(),
-        }
-    }
 }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransitionState {
     pub task_name: String,
     pub task_id: Uuid,
     pub new_state: OrcaStates,
 }
-
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ActorType {
@@ -88,8 +91,6 @@ pub enum ActorType {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum MessageType {
-
     Worker,
     Processor,
 }
-

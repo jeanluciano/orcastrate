@@ -58,7 +58,7 @@ impl Message<MatriarchMessage<TransitionState>> for Processor {
                     message.message.task_id
                 );
                 if let Some(scheduler) = &self.scheduler {
-                    scheduler.tell(message).await;
+                    let _ = scheduler.tell(message).await;
                 } else {
                     info!(
                         "Scheduler not found for task: {:?}",
@@ -117,7 +117,7 @@ impl Processor {
         worker: ActorRef<Worker>,
     ) {
         let opts = StreamReadOptions::default()
-            .group(TASK_GROUP_KEY, &id.to_string())
+            .group(TASK_GROUP_KEY, id.to_string())
             .count(10)
             .block(500);
 
@@ -158,8 +158,8 @@ impl Processor {
                                 // goof zone ending
                                 match new_state {
                                     OrcaStates::Submitted => {
-                                        info!("Processor received submitted state: {:?}", task_id);
-                                        let send_result = worker
+                                        info!("Processor received submitted state: {task_id}");
+                                        let _ = worker
                                             .tell(RunTask {
                                                 task_name: task_name_str,
                                                 task_id,
@@ -179,7 +179,7 @@ impl Processor {
                                             .await;
 
                                         if let Err(e) = send_result {
-                                            eprintln!("Error sending message to worker: {:?}", e);
+                                            eprintln!("Error sending message to worker: {e}");
                                         }
                                     }
                                 }
@@ -188,7 +188,7 @@ impl Processor {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error reading from Redis stream: {:?}. Retrying...", e);
+                    eprintln!("Error reading from Redis stream: {e}. Retrying...");
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
             }
@@ -207,11 +207,11 @@ impl Processor {
         let key_values: &[(&str, &str)] = &[
             ("task_name", &message.task_name),
             ("task_id", &message.task_id.to_string()),
-            ("new_state", &new_state),
+            ("new_state", new_state),
         ];
-        let res = self
+        let _ = self
             .redis
-            .xadd::<&str, &str, &str, &str, String>(TASK_RUN_STREAM_KEY, "*", &key_values)
+            .xadd::<&str, &str, &str, &str, String>(TASK_RUN_STREAM_KEY, "*", key_values)
             .await;
     }
 }
@@ -261,13 +261,13 @@ impl Scheduler {
     pub async fn schedule_task(&mut self, task_name: &str, task_id: Uuid, scheduled_at: u64) {
         let scheduled_at_str = scheduled_at.to_string();
         let key_values: &[(&str, &str)] = &[
-            ("task_name", &task_name),
+            ("task_name", task_name),
             ("task_id", &task_id.to_string()),
             ("scheduled_at", &scheduled_at_str),
         ];
-        let res = self
+        let _ = self
             .redis
-            .xadd::<&str, &str, &str, &str, String>(TASK_SCHEDULED_STREAM_KEY, "*", &key_values)
+            .xadd::<&str, &str, &str, &str, String>(TASK_SCHEDULED_STREAM_KEY, "*", key_values)
             .await;
     }
     pub async fn run_scheduler_loop_task(
@@ -276,7 +276,7 @@ impl Scheduler {
         processor: ActorRef<Processor>,
     ) {
         let opts = StreamReadOptions::default()
-            .group(TASK_GROUP_KEY, &id.to_string())
+            .group(TASK_GROUP_KEY, id.to_string())
             .count(10)
             .block(500);
 
@@ -316,7 +316,7 @@ impl Scheduler {
                                     .expect("scheduled_at not a valid u128");
                                 let now = tokio::time::Instant::now().elapsed().as_millis();
                                 if now >= schedeled_at {
-                                    let send_result = processor
+                                    let _ = processor
                                         .tell(MatriarchMessage {
                                             message: TransitionState {
                                                 task_name: task_name_str,
@@ -332,7 +332,7 @@ impl Scheduler {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error reading from Redis stream: {:?}. Retrying...", e);
+                    eprintln!("Error reading from Redis stream: {e}. Retrying...");
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
             }
@@ -350,12 +350,8 @@ impl Message<MatriarchMessage<TransitionState>> for Scheduler {
     ) -> Self::Reply {
         match message.message.new_state {
             OrcaStates::Scheduled => {
-                self.schedule_task(
-                    &message.message.task_name,
-                    message.message.task_id,
-                    550,
-                )
-                .await;
+                self.schedule_task(&message.message.task_name, message.message.task_id, 550)
+                    .await;
             }
             _ => {
                 info!(
