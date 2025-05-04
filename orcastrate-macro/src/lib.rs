@@ -1,21 +1,58 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::{quote, format_ident};
-use syn::{parse_macro_input, ItemFn, FnArg, PatType};
+use syn::{parse_macro_input, ItemFn, FnArg, PatType, ReturnType};
 
 
 #[proc_macro_attribute]
 pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
 
+    // --- Check for Generics (Not Supported) ---
+    if !func.sig.generics.params.is_empty() {
+        panic!("Generic task functions are not supported by #[orca_task]");
+    }
+
     let func_name = &func.sig.ident;
     let func_vis = &func.vis;
-    let func_asyncness = &func.sig.asyncness; // Should be async
-    let func_generics = &func.sig.generics; // Keep generics if any
-    let return_type = &func.sig.output;
-         // Keep return type
+    // let func_asyncness = &func.sig.asyncness; // Original function is async
+    // REMOVED: Generics handling
+    // let func_generics = &func.sig.generics;
+    // let (impl_generics, ty_generics, where_clause) = func_generics.split_for_impl();
 
-    // --- Argument Parsing (All args are task parameters now) ---
+
+    let return_type = &func.sig.output;
+    let (ok_type, err_type) = match return_type {
+        ReturnType::Type(_, ty) => {
+            if let syn::Type::Path(type_path) = &**ty {
+                if let Some(segment) = type_path.path.segments.last() {
+                    if segment.ident == "Result" {
+                        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                            if args.args.len() == 2 {
+                                let ok = &args.args[0];
+                                let err = &args.args[1];
+                                (quote! { #ok }, quote! { #err })
+                            } else {
+                                panic!("Result must have two type arguments");
+                            }
+                        } else {
+                            panic!("Result must have angle bracketed arguments");
+                        }
+                    } else {
+                        panic!("Task function must return a Result");
+                    }
+                } else {
+                    panic!("Unsupported return type path");
+                }
+            } else {
+                panic!("Task function must return a Result type");
+            }
+        }
+        ReturnType::Default => panic!("Task function must return a Result"),
+    };
+
+
+    // --- Argument Parsing ---
     let task_args: Vec<_> = func.sig.inputs.iter().map(|arg| match arg {
         FnArg::Typed(pat_type) => pat_type.clone(),
         _ => panic!("Unsupported argument type (e.g., self) in task function"),
@@ -24,117 +61,127 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let task_arg_names: Vec<_> = task_args.iter().map(|pt| &pt.pat).collect();
     let task_arg_types: Vec<_> = task_args.iter().map(|pt| &pt.ty).collect();
 
-    // --- Generated Code ---
-    let task_struct_name = format_ident!("{}", func_name.to_string()); // e.g., `foo` -> `foo` struct
-    let task_args_struct_name = format_ident!("{}Args", func_name.to_string()); // e.g., `FooArgs`
+    // --- Generated Names ---
+    let task_struct_name = format_ident!("{}", func_name.to_string()); // e.g., `my_async_task` struct
+    let task_args_struct_name = format_ident!("{}Args", func_name.to_string()); // e.g., `MyAsyncTaskArgs`
+    let future_creator_fn_name = format_ident!("create_{}_future", func_name);
+    let task_name_literal = func_name.to_string();
 
-    // 1. Argument Struct (for serialization)
+
+    // 1. Argument Struct (for serialization) - NO GENERICS
     let args_struct_def = quote! {
         #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
-        struct #task_args_struct_name #func_generics { // Include generics if func has them
-            #( #task_arg_names: #task_arg_types ),*
+        #func_vis struct #task_args_struct_name {
+            #( pub #task_arg_names: #task_arg_types ),* // Make fields public for direct access
         }
     };
 
-    // 2. Task Handle Struct
+
     let handle_struct_def = quote! {
-        #[derive(Clone)]
-        #func_vis struct #task_struct_name #func_generics { // Include generics
-            task_name: String,
-            worker_ref: ::kameo::prelude::ActorRef<::orcastra::worker::Worker>,
-             // Include PhantomData if the struct uses generics from the function
-            _marker: ::std::marker::PhantomData<(#(#task_arg_types),*)>,
+        #[derive(Debug)]
+        #func_vis struct #task_struct_name {
+            pub task_name: String,
+            pub worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>,
         }
 
-        // Add where clause if func_generics is not empty
-        impl #func_generics #task_struct_name #func_generics {
-            pub fn new(
-                task_name: String,
-                worker_ref: ::kameo::prelude::ActorRef<::orcastra::worker::Worker>
+        impl #task_struct_name {
+             fn register(
+                worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>
              ) -> Self {
-                Self { task_name, worker_ref, _marker: ::std::marker::PhantomData }
+                Self { task_name: #task_name_literal.to_string(), worker_ref }
             }
-
-            // The `submit` method takes the original function args
-            pub async fn submit(&self, #( #task_arg_names: #task_arg_types ),* ) -> Result<(), ::orcastra::worker::WorkerError>
-            // Add where clause if func_generics is not empty
+            fn get_worker_id(&self) -> String {
+                self.worker_ref.id().to_string()
+            }
+    
+            pub async fn submit(&self, #( #task_arg_names: #task_arg_types ),* ) -> Result<&Self, ::orcastrate::worker::WorkerError>
             {
                 let args = #task_args_struct_name {
-                    #( #task_arg_names: #task_arg_names.clone() ),* // Clone args if needed, or require Clone bound
+                    #( #task_arg_names: #task_arg_names.clone() ),* // TODO: Require Clone bound on arg types?
                 };
+                // Use serde_json from main crate? Assume it's available.
                 let serialized_args = ::serde_json::to_string(&args)
-                    .map_err(|e| ::orcastra::worker::WorkerError(format!("Args serialization failed: {}", e)))?;
+                    .map_err(|e| ::orcastrate::worker::WorkerError(format!("Args serialization failed: {}", e)))?;
 
-                // Use a modified SubmitTask message
-                let message = ::orcastra::messages::SubmitTaskArgs { // NEW MESSAGE TYPE
+                let message = ::orcastrate::messages::SubmitTaskArgs {
                     task_name: self.task_name.clone(),
                     args: serialized_args,
-                    // TODO: Add options like delay, retries here later
                 };
 
-                // Send to worker (might need adjustment if SubmitTaskArgs is handled differently)
-                 self.worker_ref.ask(message).await // Use ask if worker needs to confirm registration before submit
-                    .map_err(|e| ::orcastra::worker::WorkerError(format!("Kameo ask error: {}", e)))? // Handle Kameo Error
-                    .map_err(|e| ::orcastra::worker::WorkerError(format!("Worker submission error: {}", e)))?; // Handle WorkerError from worker's reply
-                 Ok(())
+                let ask_result = self.worker_ref.ask(message).await; // Returns Result<Result<(), WorkerError>, AskError>
+                println!("Ask result: {:?}", ask_result);
+                match ask_result {
+                    Ok(worker_reply) => {
+                        // `worker_reply` is Result<(), WorkerError>
+                        // Propagate the worker's result (Ok or Err)
+                        Ok(self)
+                    }
+                    Err(kameo_err) => {
+                        // Map the AskError to WorkerError
+                        Err(::orcastrate::worker::WorkerError(format!("Kameo ask error: {}", kameo_err)))
+                    }
+                }
             }
         }
     };
+
 
     // 3. The Original Function Definition (remains unchanged)
     let original_func_def = &func;
 
-    // 4. Task Runner Logic (Simplified - conceptual)
-    // This logic needs to live somewhere. Could be a generated impl or part of a new system.
-    // We'll generate a function that encapsulates creating the future.
-    let future_creator_fn_name = format_ident!("create_{}_future", func_name);
-
+    // 4. Task Future Creator Function (non-generic signature)
     let future_creator_fn = quote! {
-         // This function takes serialized args and returns a future that executes the task
-         fn #future_creator_fn_name #func_generics (serialized_args: String) // Add where clause if needed
-             -> Result<::std::pin::Pin<Box<dyn ::std::future::Future<Output = #return_type> + Send>>, ::orcastra::task::OrcaError>
-         // Add where clause for serde bounds etc.
-         where
-             // Add Send + 'static bounds etc. to generic types if necessary
+         fn #future_creator_fn_name (serialized_args: String)
+             -> Result<::orcastrate::task::TaskFuture, ::orcastrate::task::OrcaError>
          {
-             let args: #task_args_struct_name #func_generics = ::serde_json::from_str(&serialized_args)
-                 .map_err(|e| ::orcastra::task::OrcaError(format!("Args deserialization failed: {}", e)))?;
+             // Deserialization - NO GENERICS
+             let args: #task_args_struct_name = ::serde_json::from_str(&serialized_args)
+                 .map_err(|e| ::orcastrate::task::OrcaError(format!("Args deserialization failed for '{}': {}", #task_name_literal, e)))?;
 
              // Create the future that calls the original function
              let task_future = Box::pin(async move {
-                 // Directly call the original function with deserialized args
-                 #func_name(#( args.#task_arg_names ),*).await
+                 // Function call - NO GENERICS
+                 let result: Result<#ok_type, #err_type> = #func_name(#( args.#task_arg_names ),*).await;
+                 // Serialize the result or error to String
+                 match result {
+                    Ok(ok_val) => ::serde_json::to_string(&ok_val)
+                        .map_err(|e| ::orcastrate::task::OrcaError(format!("Result serialization failed: {}", e))),
+                    Err(err_val) => Err(::orcastrate::task::OrcaError(
+                        ::serde_json::to_string(&err_val)
+                            .unwrap_or_else(|e| format!("Error serialization failed: {}", e))
+                    )),
+                 }
              });
-             Ok(task_future)
+             // Wrap the Box<Pin<...>> future in the outer Result required by TaskRunnerFn
+             let wrapped_future: ::orcastrate::task::TaskFuture = Box::pin(async move {
+                match task_future.await {
+                    Ok(s) => Ok(s),
+                    Err(orca_err) => Err(orca_err.to_string()),
+                }
+             });
+
+             Ok(wrapped_future)
          }
     };
 
-
-    // 5. Registration Function (Example)
-    let registration_fn_name = format_ident!("register_{}", func_name.to_string());
-    let registration_fn = quote! {
-         #func_vis fn #registration_fn_name #func_generics ( // Add where clause
-             worker_ref: ::kameo::prelude::ActorRef<::orcastra::worker::Worker>
-         ) -> #task_struct_name #func_generics {
-             let task_name = stringify!(#func_name).to_string();
-
-             // TODO: Tell the worker how to create/run this task.
-             // This needs a new message, e.g., RegisterTaskRunner,
-             // passing the task_name and a way to invoke future_creator_fn_name.
-             // For now, just create the handle.
-             // worker_ref.tell(RegisterTaskDefinition { name: task_name.clone(), future_creator: #future_creator_fn_name }).await;
-
-             #task_struct_name::new(task_name, worker_ref)
-         }
+    // 5. Static Registration using Inventory
+    let static_registration = quote! {
+        ::inventory::submit! {
+            ::orcastrate::task::StaticTaskDefinition {
+                task_name: #task_name_literal,
+                runner: #future_creator_fn_name,
+            }
+        }
     };
 
-    // Combine generated code
+
+
     let expanded = quote! {
         #args_struct_def
         #handle_struct_def
-        #original_func_def // Keep the original function
-        #future_creator_fn // Generated function to create the future
-        #registration_fn // Generated function to get the handle
+        #original_func_def
+        #future_creator_fn
+        #static_registration
     };
 
     TokenStream::from(expanded)
