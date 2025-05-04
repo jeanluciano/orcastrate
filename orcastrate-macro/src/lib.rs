@@ -68,7 +68,7 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let task_name_literal = func_name.to_string();
 
 
-    // 1. Argument Struct (for serialization) - NO GENERICS
+    // 1. Argument Struct (for serialization)
     let args_struct_def = quote! {
         #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
         #func_vis struct #task_args_struct_name {
@@ -102,14 +102,13 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 // Use serde_json from main crate? Assume it's available.
                 let serialized_args = ::serde_json::to_string(&args)
                     .map_err(|e| ::orcastrate::worker::WorkerError(format!("Args serialization failed: {}", e)))?;
-
                 let message = ::orcastrate::messages::SubmitTaskArgs {
                     task_name: self.task_name.clone(),
                     args: serialized_args,
                 };
 
                 let ask_result = self.worker_ref.ask(message).await; // Returns Result<Result<(), WorkerError>, AskError>
-                println!("Ask result: {:?}", ask_result);
+                
                 match ask_result {
                     Ok(worker_reply) => {
                         // `worker_reply` is Result<(), WorkerError>
@@ -134,7 +133,6 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
          fn #future_creator_fn_name (serialized_args: String)
              -> Result<::orcastrate::task::TaskFuture, ::orcastrate::task::OrcaError>
          {
-             // Deserialization - NO GENERICS
              let args: #task_args_struct_name = ::serde_json::from_str(&serialized_args)
                  .map_err(|e| ::orcastrate::task::OrcaError(format!("Args deserialization failed for '{}': {}", #task_name_literal, e)))?;
 
@@ -169,7 +167,7 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ::inventory::submit! {
             ::orcastrate::task::StaticTaskDefinition {
                 task_name: #task_name_literal,
-                runner: #future_creator_fn_name,
+                task_future: #future_creator_fn_name,
             }
         }
     };

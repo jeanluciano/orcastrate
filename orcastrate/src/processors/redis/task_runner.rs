@@ -6,8 +6,9 @@ use redis::aio::MultiplexedConnection;
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, RedisError, RedisResult};
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{debug, info};
 use uuid::Uuid;
+use serde_json;
 
 // Assuming these constants are defined in the parent module (redis.rs or redis/mod.rs)
 // If not, they need to be defined here or passed in.
@@ -36,8 +37,6 @@ impl TaskRunner {
         }
     }
 
-    // Renamed from process_task_run_stream and made into an instance method
-    // Spawns a long-running task to process the stream
     async fn run_task_processing_loop(
         id: Uuid,
         mut redis: MultiplexedConnection,
@@ -145,11 +144,14 @@ impl TaskRunner {
         let task_name: String = redis::from_redis_value(task_name_val)
             .map_err(|e| format!("task_name not string: {}", e))?;
 
-        let new_state_val = map.get("new_state").ok_or("Missing new_state")?;
-        let new_state_str: String = redis::from_redis_value(new_state_val)
-            .map_err(|e| format!("new_state not string: {}", e))?;
-        let new_state = RunState::from_string(&new_state_str)
-            .ok_or_else(|| format!("Invalid OrcaState: {}", new_state_str))?;
+        // Read the serialized state data
+        let state_data_val = map.get("state_data").ok_or("Missing state_data")?;
+        let state_data_str: String = redis::from_redis_value(state_data_val)
+            .map_err(|e| format!("state_data not string: {}", e))?;
+
+        // Deserialize the full RunState from the JSON string
+        let new_state: RunState = serde_json::from_str(&state_data_str)
+            .map_err(|e| format!("Failed to deserialize RunState: {}", e))?;
 
         Ok(TransitionState {
             task_name,
@@ -158,36 +160,50 @@ impl TaskRunner {
         })
     }
 
-    // This function seems misplaced in TaskRunner if its purpose is to write
-    // state transitions initiated by the Processor.
-    // Let's keep it for now, but it might need to move to Processor or be called differently.
-    // It currently writes to TASK_RUN_STREAM_KEY which seems incorrect for results/status.
-    // Consider renaming and changing the stream key (e.g., TASK_RESULTS_STREAM_KEY).
     pub async fn write_transition(&mut self, message: TransitionState) -> RedisResult<String> {
         info!("TaskRunner writing transition message: {:?}", message);
-        let new_state_str = match message.new_state {
-            RunState::Running(_) => "Running",
-            RunState::Completed(_) => "Completed",
-            RunState::Failed(_) => "Failed",
-            RunState::Submitted(_) => "Submitted",
-            RunState::Scheduled(_) => "Scheduled",
-            // Consider adding _ => ??? or making OrcaStates non_exhaustive
-        };
-        let key_values: &[(&str, &str)] = &[
-            ("task_name", &message.task_name),
-            ("task_id", &message.task_id.to_string()),
-            ("new_state", new_state_str),
+        
+        // Serialize the entire RunState enum to JSON
+        let state_data_str = serde_json::to_string(&message.new_state)
+            .map_err(|e| {
+                // Convert serde error to something RedisResult can represent, e.g., generic error
+                // Ideally, define a custom error type that encompasses both.
+                redis::RedisError::from((redis::ErrorKind::TypeError, "Failed to serialize RunState", e.to_string()))
+            })?;
+
+        // Get the state type string for potential indexing/filtering (optional but can be useful)
+        let state_type_str = message.new_state.to_string();
+        
+        let key_values: &[(&str, String)] = &[
+            ("task_name", message.task_name.clone()),
+            ("task_id", message.task_id.to_string()),
+            ("state_type", state_type_str), // Store the type name
+            ("state_data", state_data_str), // Store the serialized state data
         ];
-        // TODO: Decide which stream this should write to. Using TASK_RUN_STREAM_KEY for now.
+
+        // Use xadd with Vec<(&str, String)> because values are now owned Strings
         self.redis.xadd(TASK_RUN_STREAM_KEY, "*", key_values).await
     }
 }
 
+
+impl Message<TransitionState> for TaskRunner {
+    type Reply = Result<(), RedisError>;
+
+    async fn handle(
+        &mut self,
+        message: TransitionState,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let _ = self.write_transition(message).await;
+        Ok(())
+    }
+}
 impl Actor for TaskRunner {
     type Args = Self;
     type Error = RedisError;
     async fn on_start(args: Self::Args, _actor_ref: ActorRef<Self>) -> Result<Self, Self::Error> {
-        info!("TaskRunner actor starting for ID: {}", args.id);
+        debug!("TaskRunner actor starting for ID: {}", args.id);
         let id = args.id;
         let redis_clone = args.redis.clone();
         let worker_clone = args.worker.clone();

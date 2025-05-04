@@ -1,12 +1,13 @@
 use crate::messages::*;
-use crate::worker::Worker;
 use crate::task::RunState;
+use crate::worker::Worker;
 use kameo::Actor;
 use kameo::prelude::*;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 use redis::streams::StreamReadReply;
 use redis::{RedisError, RedisResult};
+use tracing::debug;
 use tracing::info;
 use uuid::Uuid;
 
@@ -24,7 +25,6 @@ const TASK_SCHEDULED_STREAM_KEY: &str = "orca:streams:tasks:scheduled";
 const TASK_RESULTS_STREAM_KEY: &str = "orca:streams:tasks:results";
 const TASK_GROUP_KEY: &str = "worker";
 
-
 // Spawns
 pub struct Processor {
     id: Uuid,
@@ -32,7 +32,6 @@ pub struct Processor {
     worker: ActorRef<Worker>,
     scheduler: Option<ActorRef<Scheduler>>,
     runner: Option<ActorRef<TaskRunner>>,
-
 }
 
 impl Message<OrcaMessage<TransitionState>> for Processor {
@@ -44,22 +43,22 @@ impl Message<OrcaMessage<TransitionState>> for Processor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         match message.message.new_state {
-            RunState::Submitted(_)
-            | RunState::Running(_)
-            | RunState::Completed(_)
-            | RunState::Failed(_) => {
+            RunState::Submitted(ref state) => {
                 info!(
                     "Processor handling state {:?}: {:?}",
-                    message.message.new_state,
-                    message.message.task_id
+                    message.message.new_state, message.message.task_id
                 );
-                // Write state transition to the results stream
-                let write_result = self.write_state_to_results_stream(message.message).await;
-                 if let Err(e) = write_result {
+                let task_id = message.message.task_id;
+                let message = TransitionState {
+                    task_name: message.message.task_name,
+                    task_id: task_id,
+                    new_state: RunState::Submitted(state.clone()),
+                };
+                let res = self.runner.as_ref().unwrap().ask(message).await;
+                if let Err(e) = res {
                     eprintln!("Error writing state to results stream: {:?}", e);
-                    // Decide on error handling, potentially return success: false
                     return OrcaReply { success: false };
-                 }
+                }
             }
             RunState::Scheduled(_) => {
                 info!(
@@ -78,15 +77,15 @@ impl Message<OrcaMessage<TransitionState>> for Processor {
                         "Scheduler actor not available for task: {:?}",
                         message.message.task_id
                     );
-                     return OrcaReply { success: false };
+                    return OrcaReply { success: false };
                 }
-            }
-            // _ => { // Catch-all removed as all enum variants are covered
-            //     info!(
-            //         "Processor received unhandled state: {:?}",
-            //         message.message.new_state
-            //     );
-            // }
+            } 
+            _ => { // Catch-all removed as all enum variants are covered
+                  info!(
+                      "Processor received unhandled state: {:?}",
+                      message.message.new_state
+                  );
+              }
         }
         OrcaReply { success: true }
     }
@@ -99,8 +98,11 @@ impl Processor {
         let mut redis = client.get_multiplexed_async_connection().await.unwrap();
         // Ensure streams exist before starting actors that might use them
         if let Err(e) = Self::ensure_streams(&mut redis).await {
-             eprintln!("Failed to ensure Redis streams: {:?}. Processor initialization might fail.", e);
-             // Depending on severity, might want to panic or handle differently
+            eprintln!(
+                "Failed to ensure Redis streams: {:?}. Processor initialization might fail.",
+                e
+            );
+            // Depending on severity, might want to panic or handle differently
         }
         Self {
             id,
@@ -126,14 +128,17 @@ impl Processor {
         // Check results, ignoring "BUSYGROUP" errors
         for res in [task_run_res, scheduled_res, results_res] {
             match res {
-                Ok(_) => {},
-                Err(e) if e.kind() == redis::ErrorKind::ExtensionError && e.to_string().contains("BUSYGROUP") => {
+                Ok(_) => {}
+                Err(e)
+                    if e.kind() == redis::ErrorKind::ExtensionError
+                        && e.to_string().contains("BUSYGROUP") =>
+                {
                     // Group already exists, which is fine
-                    info!("Consumer group already exists (ignored): {}", e);
+                    debug!("Consumer group already exists (ignored): {}", e);
                 }
                 Err(e) => {
                     // Other Redis error, return it
-                     eprintln!("Error creating stream/group: {:?}", e);
+                    eprintln!("Error creating stream/group: {:?}", e);
                     return Err(e);
                 }
             }
@@ -142,8 +147,14 @@ impl Processor {
     }
 
     // New method to write state transitions to the results stream
-    async fn write_state_to_results_stream(&mut self, state: TransitionState) -> RedisResult<String> {
-        info!("Processor writing state {:?} for task {} to results stream", state.new_state, state.task_id);
+    async fn write_state_to_results_stream(
+        &mut self,
+        state: TransitionState,
+    ) -> RedisResult<String> {
+        info!(
+            "Processor writing state {:?} for task {} to results stream",
+            state.new_state, state.task_id
+        );
         let new_state_str = match state.new_state {
             RunState::Running(_) => "Running",
             RunState::Completed(_) => "Completed",
@@ -151,8 +162,13 @@ impl Processor {
             RunState::Submitted(_) => "Submitted",
             // Scheduled is handled by the Scheduler, shouldn't be written here directly
             RunState::Scheduled(_) => {
-                 eprintln!("Attempted to write Scheduled state directly via Processor::write_state_to_results_stream");
-                 return Err(redis::RedisError::from((redis::ErrorKind::InvalidClientConfig, "Cannot write Scheduled state to results stream")));
+                eprintln!(
+                    "Attempted to write Scheduled state directly via Processor::write_state_to_results_stream"
+                );
+                return Err(redis::RedisError::from((
+                    redis::ErrorKind::InvalidClientConfig,
+                    "Cannot write Scheduled state to results stream",
+                )));
             }
         };
         let key_values: &[(&str, &str)] = &[
@@ -173,7 +189,7 @@ impl Actor for Processor {
         mut args: Self::Args,
         actor_ref: ActorRef<Self>,
     ) -> Result<Self, Self::Error> {
-        info!("Processor actor starting with ID: {}", args.id);
+        debug!("Processor actor starting with ID: {}", args.id);
         let id = args.id;
         let processor_conn = args.redis.clone(); // Clone connection for Processor itself if needed
         let scheduler_conn = args.redis.clone();
@@ -184,15 +200,13 @@ impl Actor for Processor {
         // Spawn Scheduler
         let scheduler = Scheduler::new(id, scheduler_conn, actor_ref.clone()).await;
         args.scheduler = Some(Scheduler::spawn(scheduler));
-        info!("Scheduler spawned");
+    
 
         // Spawn TaskRunner
         let task_runner = TaskRunner::new(id, runner_conn, processor_ref_clone, worker_clone).await;
         args.runner = Some(TaskRunner::spawn(task_runner));
-        info!("TaskRunner spawned");
+
 
         Ok(args)
     }
 }
-
-

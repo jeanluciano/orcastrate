@@ -3,9 +3,9 @@ use kameo::Actor;
 use kameo::prelude::{ActorRef, Context, Message};
 use redis::aio::MultiplexedConnection;
 use redis::streams::{StreamReadOptions, StreamReadReply};
-use redis::{AsyncCommands, RedisError, RedisResult};
+use redis::{AsyncCommands, RedisError};
 use uuid::Uuid;
-use tracing::info;
+use tracing::{info, debug};
 use super::{Processor, TASK_GROUP_KEY, TASK_SCHEDULED_STREAM_KEY};
 use crate::task::{RunState, Submitted};
 
@@ -138,7 +138,7 @@ impl Actor for Scheduler {
     type Args = Self;
     type Error = RedisError;
     async fn on_start(args: Self::Args, _actor_ref: ActorRef<Self>) -> Result<Self, RedisError> {
-        info!("Scheduler starting");
+        debug!("Scheduler starting with id: {}", args.id);
         let id = args.id;
         let task_redis = args.redis.clone();
         let task_processor = args.processor.clone();

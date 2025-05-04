@@ -1,5 +1,4 @@
 use crate::types::TaskData;
-use crate::types::TaskFutureGen;
 use kameo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -11,10 +10,7 @@ pub struct SubmitTaskArgs {
     pub args: String,
     // Add other fields like options (delay, retries) here later if needed
 } 
-pub struct RegisterTask<R> {
-    pub task_name: String,
-    pub task_future: TaskFutureGen<R>,
-}
+
 
 #[derive(Debug, Clone)]
 pub struct RunTask {

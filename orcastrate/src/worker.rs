@@ -1,36 +1,37 @@
 use crate::messages::{
-    OrcaMessage, OrcaReply, Recipient, RegisterTask, RunTask, ScheduleTask, SubmitTask,
-    SubmitTaskArgs, TransitionState,
+    OrcaMessage, OrcaReply, Recipient, RunTask, ScheduleTask, SubmitTask, SubmitTaskArgs,
+    TransitionState,
 };
-use crate::task::{
-     RegisteredTask, Running, Run, Scheduled, StaticTaskDefinition,
-    Submitted, TaskRunner, RunState,
-};
+use crate::task::{ RunState, Scheduled, StaticTaskDefinition, Submitted, TaskRun};
 
 use crate::processors::redis::Processor;
+use inventory;
 use kameo::Actor;
 use kameo::prelude::{ActorRef, Context, Message};
 use std::collections::HashMap;
-use tracing::info;
-use uuid::Uuid;
 use thiserror::Error;
-use crate::types::TaskResult;
-use inventory;
-
+use tracing::info;
+use tracing_subscriber;
+use uuid::Uuid;
 pub struct Worker {
     id: Uuid,
     url: String,
     pub registered_tasks: HashMap<String, StaticTaskDefinition>,
-    pub task_runs: HashMap<Uuid, Box<dyn Run>>,
+    pub task_runs: HashMap<Uuid, ActorRef<TaskRun>>,
     processor: Option<ActorRef<Processor>>,
 }
 
 impl Worker {
     pub fn new(url: String) -> Self {
+        let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+            .compact()
+            .without_time()
+            .finish();
+
+        tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
         let id = Uuid::new_v4();
         let mut registered_tasks: HashMap<String, StaticTaskDefinition> = HashMap::new();
         for task_def in inventory::iter::<StaticTaskDefinition> {
-            println!("Discovered task: {}", task_def.task_name);
             registered_tasks.insert(task_def.task_name.to_string(), task_def.clone());
         }
         Self {
@@ -39,7 +40,7 @@ impl Worker {
             task_runs: HashMap::new(),
             registered_tasks,
             processor: None,
-        }   
+        }
     }
     pub async fn run(self) -> ActorRef<Self> {
         let worker_actor = Self::spawn(self);
@@ -56,7 +57,6 @@ impl Actor for Worker {
         mut args: Self::Args,
         actor_ref: ActorRef<Self>,
     ) -> Result<Self, WorkerError> {
-
         let processor = Processor::spawn(Processor::new(args.id, &args.url, actor_ref).await);
         args.processor = Some(processor);
         Ok(args)
@@ -65,7 +65,6 @@ impl Actor for Worker {
 
 impl Message<OrcaMessage<TransitionState>> for Worker {
     type Reply = OrcaReply;
-
     async fn handle(
         &mut self,
         message: OrcaMessage<TransitionState>,
@@ -102,7 +101,7 @@ impl Message<OrcaMessage<TransitionState>> for Worker {
                     message.message.new_state.to_string()
                 );
                 if let Some(recipient) = self.task_runs.get(&task_id_clone) {
-                    match recipient.forward_matriarch_request(message).await {
+                    match recipient.ask(message).await {
                         Ok(reply) => reply,
                         Err(e) => {
                             eprintln!("Error asking orca task {}: {}", task_id_clone, e);
@@ -117,22 +116,6 @@ impl Message<OrcaMessage<TransitionState>> for Worker {
         }
     }
 }
-
-// impl<R: TaskResult> Message<RegisterTask<R>> for Worker {
-//     type Reply = Result<(), WorkerError>;
-
-//     async fn handle(
-//         &mut self,
-//         message: RegisterTask<R>,
-//         ctx: &mut Context<Self, Self::Reply>,
-//     ) -> Self::Reply {
-//         let task_name = message.task_name.clone();
-//         let worker_ref = ctx.actor_ref();
-//         let task = RegisteredTask::new(task_name.clone(), message.task_future, worker_ref.clone());
-//         self.registered_tasks.insert(task_name, Box::new(task));
-//         Ok(())
-//     }
-// }
 
 impl Message<ScheduleTask> for Worker {
     type Reply = Result<(), WorkerError>;
@@ -150,7 +133,9 @@ impl Message<ScheduleTask> for Worker {
             message: TransitionState {
                 task_name: task_name,
                 task_id: task_id,
-                new_state: RunState::Scheduled(Scheduled { delay: scheduled_at as u64 }),
+                new_state: RunState::Scheduled(Scheduled {
+                    delay: scheduled_at as u64,
+                }),
             },
             recipient: Recipient::Processor,
         });
@@ -197,12 +182,12 @@ impl Message<SubmitTask> for Worker {
 
 impl Message<SubmitTaskArgs> for Worker {
     type Reply = Result<(), WorkerError>;
-
     async fn handle(
         &mut self,
         message: SubmitTaskArgs,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        println!("Submitting task: {}", message.task_name);
         let task_id = Uuid::new_v4();
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
             info!("Submitting task: {}:{}", message.task_name, task_id);
@@ -241,20 +226,21 @@ impl Message<RunTask> for Worker {
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let name = &message.task_name;
-
-        if let Some(spawner) = self.registered_tasks.remove(name) {
-            let id = message.task_id;
-            let worker_ref = ctx.actor_ref();
-            let future = (spawner.runner)(message.args);
-            let result = future;
-            Ok(())
-        } else {
-            Err(WorkerError(format!("Task {} not registered", name)))
-        }
+        info!("___Running task___: {}", name);
+        let orca = TaskRun::new(
+            message.task_id,
+            name.to_string(),
+            ctx.actor_ref(),
+            Some(self.registered_tasks.get(name).unwrap().task_future.clone()),
+            message.args,
+        );
+        let actor_ref = TaskRun::spawn(orca);
+        self.task_runs.insert(message.task_id, actor_ref);
+        Ok(())
     }
 }
 
-#[derive(Error,Debug, Clone)]
+#[derive(Error, Debug, Clone)]
 pub struct WorkerError(pub String);
 
 impl std::fmt::Display for WorkerError {
