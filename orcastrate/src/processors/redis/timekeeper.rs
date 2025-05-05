@@ -22,8 +22,8 @@ impl TimeKeeper {
     }
 
     // Placeholder for handling scheduled tasks
-    async fn handle_scheduled(&mut self, message: OrcaMessage<TransitionState>) {
-        info!("TimeKeeper handling scheduled task: {:?}", message.message.task_id);
+    async fn handle_scheduled(&mut self, message: TransitionState) {
+        info!("TimeKeeper handling scheduled task: {:?}", message.task_id);
         // TODO: Implement scheduling logic (e.g., writing to TASK_SCHEDULED_STREAM_KEY)
     }
 
@@ -87,16 +87,13 @@ impl TimeKeeper {
                                 let now = tokio::time::Instant::now().elapsed().as_millis();
                                 if now >= schedeled_at {
                                     let send_result = processor
-                                        .tell(OrcaMessage {
-                                            message: TransitionState {
-                                                task_name: task_name_str,
-                                                task_id,
-                                                new_state: RunState::Submitted(Submitted {
+                                        .tell(TransitionState {
+                                            task_name: task_name_str,
+                                            task_id,
+                                            new_state: RunState::Submitted(Submitted {
                                                     max_retries: 0,
                                                     args: "".to_string(),
                                                 }),
-                                            },
-                                            recipient: Recipient::Processor,
                                         })
                                         .await;
                                 }
@@ -113,21 +110,21 @@ impl TimeKeeper {
     }
 }
 
-impl Message<OrcaMessage<TransitionState>> for TimeKeeper {
+impl Message<TransitionState> for TimeKeeper {
     type Reply = OrcaReply;
 
     async fn handle(
         &mut self,
-        message: OrcaMessage<TransitionState>,
+        message: TransitionState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        match message.message.new_state {
+        match message.new_state {
             RunState::Scheduled(_) => {
                self.handle_scheduled(message).await;
             }
             _ => {
                 // Should not receive other states, but log if it happens
-                info!("TimeKeeper received unexpected state: {:?} for task: {:?}", message.message.new_state, message.message.task_id);
+                info!("TimeKeeper received unexpected state: {:?} for task: {:?}", message.new_state, message.task_id);
             }
         }
         OrcaReply { success: true }

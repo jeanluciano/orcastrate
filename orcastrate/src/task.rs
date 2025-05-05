@@ -80,13 +80,10 @@ impl TaskRun {
                 );
                 let _ = &self
                     .worker
-                    .tell(OrcaMessage {
-                        message: TransitionState {
-                            task_name: self.name.clone(),
-                            task_id: self.id,
-                            new_state: self.state.clone(),
-                        },
-                        recipient: Recipient::Processor,
+                    .tell(TransitionState {
+                        task_name: self.name.clone(),
+                        task_id: self.id,
+                        new_state: self.state.clone(),
                     })
                     .await
                     .map_err(|e| {
@@ -179,15 +176,15 @@ impl Actor for TaskRun {
     }
 }
 
-impl Message<OrcaMessage<TransitionState>> for TaskRun {
+impl Message<TransitionState> for TaskRun {
     type Reply = OrcaReply;
 
     async fn handle(
         &mut self,
-        message: OrcaMessage<TransitionState>,
+        message: TransitionState,
         _ctx: &mut Context<TaskRun, OrcaReply>,
     ) -> Self::Reply {
-        match self.transition_to_state(message.message.new_state).await {
+        match self.transition_to_state(message.new_state).await {
             Ok(_) => OrcaReply { success: true },
             Err(e) => {
                 eprintln!("State transition failed for Task {}: {}", self.id, e);
@@ -224,16 +221,13 @@ impl Message<TaskCompleted> for TaskRun {
         // 3. Notify the worker/processor about the external state change
         let notify_result = self
             .worker
-            .tell(OrcaMessage {
-                message: TransitionState {
-                    task_name: self.name.clone(),
-                    task_id: self.id,
-                    new_state: RunState::Completed(Completed {
+            .tell(TransitionState {
+                task_name: self.name.clone(),
+                task_id: self.id,
+                new_state: RunState::Completed(Completed {
                         params: vec![],
                         result: message.result_string.clone(),
                     }),
-                },
-                recipient: Recipient::Processor, // Notify processor
             })
             .await;
 

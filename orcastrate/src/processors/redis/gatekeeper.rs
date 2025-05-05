@@ -13,15 +13,15 @@ use serde_json;
 // Assuming these constants are defined in the parent module (redis.rs or redis/mod.rs)
 // If not, they need to be defined here or passed in.
 // For now, let's assume they are accessible via super::
-use super::{Processor, TASK_GROUP_KEY, TASK_RUN_STREAM_KEY};
+use super::{TASK_GROUP_KEY, TASK_RUN_STREAM_KEY};
 
-pub struct StateScribe {
+pub struct GateKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
     worker: ActorRef<Worker>,
 }
 
-impl StateScribe {
+impl GateKeeper {
     pub async fn new(
         id: Uuid,
         redis: MultiplexedConnection,
@@ -40,7 +40,7 @@ impl StateScribe {
         worker: ActorRef<Worker>,
         // processor: ActorRef<Processor>, // Add processor back if direct communication is needed
     ) {
-        info!("StateScribe starting processing loop for {}", id);
+        info!("GateKeeper starting processing loop for {}", id);
         let consumer_id = id.to_string();
         let opts = StreamReadOptions::default()
             .group(TASK_GROUP_KEY, &consumer_id)
@@ -97,7 +97,7 @@ impl StateScribe {
         match Self::parse_transition_state(map) {
             Ok(transition) => {
                 info!(
-                    "StateScribe processing task: {}, state: {:?}",
+                    "GateKeeper processing task: {}, state: {:?}",
                     transition.task_id, transition.new_state
                 );
                 match transition.new_state {
@@ -113,7 +113,7 @@ impl StateScribe {
                         // Handle potential send error?
                     }
                     _ => {
-                        println!("StateScribe processing other state: {:?}", transition.new_state);
+                        println!("GateKeeper processing other state: {:?}", transition.new_state);
                         // Handle potential ask error?
                     }
                 }
@@ -158,7 +158,7 @@ impl StateScribe {
     }
 
     pub async fn write_transition(&mut self, message: TransitionState) -> RedisResult<String> {
-        info!("StateScribe writing transition message: {:?}", message);
+        info!("GateKeeper writing transition message: {:?}", message);
         
         // Serialize the entire RunState enum to JSON
         let state_data_str = serde_json::to_string(&message.new_state)
@@ -184,7 +184,7 @@ impl StateScribe {
 }
 
 
-impl Message<TransitionState> for StateScribe {
+impl Message<TransitionState> for GateKeeper {
     type Reply = Result<(), RedisError>;
 
     async fn handle(
@@ -196,11 +196,11 @@ impl Message<TransitionState> for StateScribe {
         Ok(())
     }
 }
-impl Actor for StateScribe {
+impl Actor for GateKeeper {
     type Args = Self;
     type Error = RedisError;
     async fn on_start(args: Self::Args, _actor_ref: ActorRef<Self>) -> Result<Self, Self::Error> {
-        debug!("StateScribe actor starting for ID: {}", args.id);
+        debug!("GateKeeper actor starting for ID: {}", args.id);
         let id = args.id;
         let redis_clone = args.redis.clone();
         let worker_clone = args.worker.clone();
@@ -208,7 +208,7 @@ impl Actor for StateScribe {
 
         // Spawn the stream processing loop as a separate, long-running task
         tokio::spawn(async move {
-            StateScribe::run_task_processing_loop(
+            GateKeeper::run_task_processing_loop(
                 id,
                 redis_clone,
                 worker_clone, /*, processor_clone */

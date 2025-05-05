@@ -63,55 +63,19 @@ impl Actor for Worker {
     }
 }
 
-impl Message<OrcaMessage<TransitionState>> for Worker {
+impl Message<TransitionState> for Worker {
     type Reply = OrcaReply;
     async fn handle(
         &mut self,
-        message: OrcaMessage<TransitionState>,
+        message: TransitionState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        match message.recipient {
-            Recipient::Processor => {
-                info!(
-                    "→ → {}:{} → → ",
-                    message.message.task_id,
-                    message.message.new_state.to_string()
-                );
-                if let Some(proc) = &self.processor {
-                    match proc.ask(message).await {
-                        Ok(reply) => reply,
-                        Err(e) => {
-                            eprintln!("Error asking processor: {}", e);
-                            OrcaReply { success: false }
-                        }
-                    }
-                } else {
-                    eprintln!(
-                        "Processor not available for task: {}",
-                        message.message.task_id
-                    );
-                    OrcaReply { success: false }
-                }
-            }
-            Recipient::Orca => {
-                let task_id_clone = message.message.task_id.clone();
-                info!(
-                    "← ← {}:{} ← ← ",
-                    task_id_clone,
-                    message.message.new_state.to_string()
-                );
-                if let Some(recipient) = self.task_runs.get(&task_id_clone) {
-                    match recipient.ask(message).await {
-                        Ok(reply) => reply,
-                        Err(e) => {
-                            eprintln!("Error asking orca task {}: {}", task_id_clone, e);
-                            OrcaReply { success: false }
-                        }
-                    }
-                } else {
-                    eprintln!("Orca task {} not found or not running", task_id_clone);
-                    OrcaReply { success: false }
-                }
+        let res = self.processor.as_ref().unwrap().ask(message).await;
+        match res {
+            Ok(reply) => reply,
+            Err(e) => {
+                eprintln!("Error handling transition state: {}", e);
+                OrcaReply { success: false }
             }
         }
     }
@@ -129,16 +93,13 @@ impl Message<ScheduleTask> for Worker {
         let task_name = message.task_name.clone();
         let scheduled_at = message.scheduled_at;
         let task = self.registered_tasks.get_mut(&task_name).unwrap();
-        let rest = self.processor.as_ref().unwrap().ask(OrcaMessage {
-            message: TransitionState {
+        let res = self.processor.as_ref().unwrap().ask(TransitionState {
                 task_name: task_name,
                 task_id: task_id,
                 new_state: RunState::Scheduled(Scheduled {
                     delay: scheduled_at as u64,
                 }),
-            },
-            recipient: Recipient::Processor,
-        });
+            });
         Ok(())
     }
 }
@@ -160,16 +121,13 @@ impl Message<SubmitTask> for Worker {
                 .processor
                 .as_ref()
                 .unwrap()
-                .ask(OrcaMessage {
-                    message: TransitionState {
-                        task_name: message.task_name,
-                        task_id: task_id,
-                        new_state: RunState::Submitted(Submitted {
-                            max_retries: 0,
-                            args: message.args,
-                        }),
-                    },
-                    recipient: Recipient::Processor,
+                .ask(TransitionState {
+                    task_name: message.task_name,
+                    task_id: task_id,
+                    new_state: RunState::Submitted(Submitted {
+                        max_retries: 0,
+                        args: message.args,
+                    }),
                 })
                 .await;
             Ok(())

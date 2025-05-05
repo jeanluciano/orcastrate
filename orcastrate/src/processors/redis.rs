@@ -12,12 +12,12 @@ use tracing::info;
 use uuid::Uuid;
 
 // Declare modules
-mod time_keeper;
-mod state_scribe;
+mod gatekeeper;
+mod timekeeper;
 
 // Use items from modules
-use time_keeper::TimeKeeper;
-use state_scribe::StateScribe;
+use gatekeeper::GateKeeper;
+use timekeeper::TimeKeeper;
 
 // Define constants within this file for now
 const TASK_RUN_STREAM_KEY: &str = "orca:streams:tasks:run";
@@ -30,31 +30,31 @@ pub struct Processor {
     id: Uuid,
     redis: MultiplexedConnection,
     worker: ActorRef<Worker>,
-    time_keeper: Option<ActorRef<TimeKeeper>>,
-    state_scribe: Option<ActorRef<StateScribe>>,
+    timekeeper: Option<ActorRef<TimeKeeper>>,
+    gatekeeper: Option<ActorRef<GateKeeper>>,
 }
 
-impl Message<OrcaMessage<TransitionState>> for Processor {
+impl Message<TransitionState> for Processor {
     type Reply = OrcaReply;
 
     async fn handle(
         &mut self,
-        message: OrcaMessage<TransitionState>,
+        message: TransitionState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        match message.message.new_state {
+        match message.new_state {
             RunState::Submitted(ref state) => {
                 info!(
                     "Processor handling state {:?}: {:?}",
-                    message.message.new_state, message.message.task_id
+                    message.new_state, message.task_id
                 );
-                let task_id = message.message.task_id;
+                let task_id = message.task_id;
                 let message = TransitionState {
-                    task_name: message.message.task_name,
+                    task_name: message.task_name,
                     task_id: task_id,
                     new_state: RunState::Submitted(state.clone()),
                 };
-                let res = self.state_scribe.as_ref().unwrap().ask(message).await;
+                let res = self.gatekeeper.as_ref().unwrap().ask(message).await;
                 if let Err(e) = res {
                     eprintln!("Error writing state to results stream: {:?}", e);
                     return OrcaReply { success: false };
@@ -63,11 +63,11 @@ impl Message<OrcaMessage<TransitionState>> for Processor {
             RunState::Scheduled(_) => {
                 info!(
                     "Processor forwarding scheduled state: {:?}",
-                    message.message.task_id
+                    message.task_id
                 );
-                if let Some(time_keeper) = &self.time_keeper {
+                if let Some(timekeeper) = &self.timekeeper {
                     // Forward the message to the scheduler actor
-                    let send_result = time_keeper.tell(message).await;
+                    let send_result = timekeeper.tell(message).await;
                     if let Err(e) = send_result {
                         eprintln!("Error sending message to scheduler: {:?}", e);
                         return OrcaReply { success: false };
@@ -75,17 +75,17 @@ impl Message<OrcaMessage<TransitionState>> for Processor {
                 } else {
                     eprintln!(
                         "Scheduler actor not available for task: {:?}",
-                        message.message.task_id
+                        message.task_id
                     );
                     return OrcaReply { success: false };
                 }
-            } 
-            _ => { // Catch-all removed as all enum variants are covered
-                  info!(
-                      "Processor received unhandled state: {:?}",
-                      message.message.new_state
-                  );
-              }
+            }
+            _ => {
+                info!(
+                    "Processor received unhandled state: {:?}",
+                    message.new_state
+                );
+            }
         }
         OrcaReply { success: true }
     }
@@ -96,7 +96,7 @@ impl Processor {
     pub async fn new(id: Uuid, redis_url: &str, worker: ActorRef<Worker>) -> Self {
         let client = redis::Client::open(redis_url).unwrap();
         let mut redis = client.get_multiplexed_async_connection().await.unwrap();
-        // Ensure streams exist before starting actors that might use them
+
         if let Err(e) = Self::ensure_streams(&mut redis).await {
             eprintln!(
                 "Failed to ensure Redis streams: {:?}. Processor initialization might fail.",
@@ -108,8 +108,8 @@ impl Processor {
             id,
             redis,
             worker,
-            time_keeper: None,
-            state_scribe: None, // Initialize runner as None
+            timekeeper: None,
+            gatekeeper: None, // Initialize runner as None
         }
     }
 
@@ -145,41 +145,6 @@ impl Processor {
         }
         Ok(())
     }
-
-    // New method to write state transitions to the results stream
-    async fn write_state_to_results_stream(
-        &mut self,
-        state: TransitionState,
-    ) -> RedisResult<String> {
-        info!(
-            "Processor writing state {:?} for task {} to results stream",
-            state.new_state, state.task_id
-        );
-        let new_state_str = match state.new_state {
-            RunState::Running(_) => "Running",
-            RunState::Completed(_) => "Completed",
-            RunState::Failed(_) => "Failed",
-            RunState::Submitted(_) => "Submitted",
-            // Scheduled is handled by the Scheduler, shouldn't be written here directly
-            RunState::Scheduled(_) => {
-                eprintln!(
-                    "Attempted to write Scheduled state directly via Processor::write_state_to_results_stream"
-                );
-                return Err(redis::RedisError::from((
-                    redis::ErrorKind::InvalidClientConfig,
-                    "Cannot write Scheduled state to results stream",
-                )));
-            }
-        };
-        let key_values: &[(&str, &str)] = &[
-            ("task_name", &state.task_name),
-            ("task_id", &state.task_id.to_string()),
-            ("new_state", new_state_str),
-        ];
-        self.redis
-            .xadd(TASK_RESULTS_STREAM_KEY, "*", key_values)
-            .await
-    }
 }
 
 impl Actor for Processor {
@@ -196,14 +161,12 @@ impl Actor for Processor {
         let worker_clone = args.worker.clone();
 
         // Spawn Scheduler
-        let time_keeper = TimeKeeper::new(id, scheduler_conn, actor_ref.clone()).await;
-        args.time_keeper = Some(TimeKeeper::spawn(time_keeper));
-    
+        let timekeeper = TimeKeeper::new(id, scheduler_conn, actor_ref.clone()).await;
+        args.timekeeper = Some(TimeKeeper::spawn(timekeeper));
 
         // Spawn TaskRunner
-        let state_scribe = StateScribe::new(id, runner_conn, worker_clone).await;
-        args.state_scribe = Some(StateScribe::spawn(state_scribe));
-
+        let gatekeeper = GateKeeper::new(id, runner_conn, worker_clone).await;
+        args.gatekeeper = Some(GateKeeper::spawn(gatekeeper));
 
         Ok(args)
     }
