@@ -10,20 +10,20 @@ use super::{Processor, TASK_GROUP_KEY, TASK_SCHEDULED_STREAM_KEY};
 use crate::task::{RunState, Submitted};
 
 
-pub struct Scheduler {
+pub struct TimeKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
     processor: ActorRef<Processor>,
 }
 
-impl Scheduler {
+impl TimeKeeper {
     pub async fn new(id: Uuid, redis: MultiplexedConnection, processor: ActorRef<Processor>) -> Self {
         Self { id, redis, processor }
     }
 
     // Placeholder for handling scheduled tasks
     async fn handle_scheduled(&mut self, message: OrcaMessage<TransitionState>) {
-        info!("Scheduler handling scheduled task: {:?}", message.message.task_id);
+        info!("TimeKeeper handling scheduled task: {:?}", message.message.task_id);
         // TODO: Implement scheduling logic (e.g., writing to TASK_SCHEDULED_STREAM_KEY)
     }
 
@@ -113,7 +113,7 @@ impl Scheduler {
     }
 }
 
-impl Message<OrcaMessage<TransitionState>> for Scheduler {
+impl Message<OrcaMessage<TransitionState>> for TimeKeeper {
     type Reply = OrcaReply;
 
     async fn handle(
@@ -127,18 +127,18 @@ impl Message<OrcaMessage<TransitionState>> for Scheduler {
             }
             _ => {
                 // Should not receive other states, but log if it happens
-                info!("Scheduler received unexpected state: {:?} for task: {:?}", message.message.new_state, message.message.task_id);
+                info!("TimeKeeper received unexpected state: {:?} for task: {:?}", message.message.new_state, message.message.task_id);
             }
         }
         OrcaReply { success: true }
     }
 }
 
-impl Actor for Scheduler {
+impl Actor for TimeKeeper {
     type Args = Self;
     type Error = RedisError;
     async fn on_start(args: Self::Args, _actor_ref: ActorRef<Self>) -> Result<Self, RedisError> {
-        debug!("Scheduler starting with id: {}", args.id);
+        debug!("TimeKeeper starting with id: {}", args.id);
         let id = args.id;
         let task_redis = args.redis.clone();
         let task_processor = args.processor.clone();

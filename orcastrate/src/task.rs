@@ -178,30 +178,6 @@ impl Actor for TaskRun {
         Ok(())
     }
 }
-struct GetField {
-    pub field: TaskData,
-}
-impl Message<GetField> for TaskRun {
-    type Reply = GetOrcaFieldReply;
-
-    async fn handle(
-        &mut self,
-        _message: GetField,
-        _ctx: &mut Context<TaskRun, Self::Reply>,
-    ) -> Self::Reply {
-        match _message.field {
-            TaskData::Id(_id) => GetOrcaFieldReply {
-                field: TaskData::Id(self.id),
-            },
-            TaskData::Name(_name) => GetOrcaFieldReply {
-                field: TaskData::Name(self.name.clone()),
-            },
-            TaskData::State(_state) => GetOrcaFieldReply {
-                field: TaskData::State(self.state.clone()),
-            },
-        }
-    }
-}
 
 impl Message<OrcaMessage<TransitionState>> for TaskRun {
     type Reply = OrcaReply;

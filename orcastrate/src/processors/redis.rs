@@ -12,12 +12,12 @@ use tracing::info;
 use uuid::Uuid;
 
 // Declare modules
-mod scheduler;
-mod task_runner;
+mod time_keeper;
+mod state_scribe;
 
 // Use items from modules
-use scheduler::Scheduler;
-use task_runner::TaskRunner;
+use time_keeper::TimeKeeper;
+use state_scribe::StateScribe;
 
 // Define constants within this file for now
 const TASK_RUN_STREAM_KEY: &str = "orca:streams:tasks:run";
@@ -30,8 +30,8 @@ pub struct Processor {
     id: Uuid,
     redis: MultiplexedConnection,
     worker: ActorRef<Worker>,
-    scheduler: Option<ActorRef<Scheduler>>,
-    runner: Option<ActorRef<TaskRunner>>,
+    time_keeper: Option<ActorRef<TimeKeeper>>,
+    state_scribe: Option<ActorRef<StateScribe>>,
 }
 
 impl Message<OrcaMessage<TransitionState>> for Processor {
@@ -54,7 +54,7 @@ impl Message<OrcaMessage<TransitionState>> for Processor {
                     task_id: task_id,
                     new_state: RunState::Submitted(state.clone()),
                 };
-                let res = self.runner.as_ref().unwrap().ask(message).await;
+                let res = self.state_scribe.as_ref().unwrap().ask(message).await;
                 if let Err(e) = res {
                     eprintln!("Error writing state to results stream: {:?}", e);
                     return OrcaReply { success: false };
@@ -65,9 +65,9 @@ impl Message<OrcaMessage<TransitionState>> for Processor {
                     "Processor forwarding scheduled state: {:?}",
                     message.message.task_id
                 );
-                if let Some(scheduler) = &self.scheduler {
+                if let Some(time_keeper) = &self.time_keeper {
                     // Forward the message to the scheduler actor
-                    let send_result = scheduler.tell(message).await;
+                    let send_result = time_keeper.tell(message).await;
                     if let Err(e) = send_result {
                         eprintln!("Error sending message to scheduler: {:?}", e);
                         return OrcaReply { success: false };
@@ -108,8 +108,8 @@ impl Processor {
             id,
             redis,
             worker,
-            scheduler: None,
-            runner: None, // Initialize runner as None
+            time_keeper: None,
+            state_scribe: None, // Initialize runner as None
         }
     }
 
@@ -184,27 +184,25 @@ impl Processor {
 
 impl Actor for Processor {
     type Args = Self;
-    type Error = RedisError; // Use RedisError as the primary error source during startup
+    type Error = RedisError;
     async fn on_start(
         mut args: Self::Args,
         actor_ref: ActorRef<Self>,
     ) -> Result<Self, Self::Error> {
         debug!("Processor actor starting with ID: {}", args.id);
         let id = args.id;
-        let processor_conn = args.redis.clone(); // Clone connection for Processor itself if needed
         let scheduler_conn = args.redis.clone();
         let runner_conn = args.redis.clone();
         let worker_clone = args.worker.clone();
-        let processor_ref_clone = actor_ref.clone(); // Clone ref for TaskRunner
 
         // Spawn Scheduler
-        let scheduler = Scheduler::new(id, scheduler_conn, actor_ref.clone()).await;
-        args.scheduler = Some(Scheduler::spawn(scheduler));
+        let time_keeper = TimeKeeper::new(id, scheduler_conn, actor_ref.clone()).await;
+        args.time_keeper = Some(TimeKeeper::spawn(time_keeper));
     
 
         // Spawn TaskRunner
-        let task_runner = TaskRunner::new(id, runner_conn, processor_ref_clone, worker_clone).await;
-        args.runner = Some(TaskRunner::spawn(task_runner));
+        let state_scribe = StateScribe::new(id, runner_conn, worker_clone).await;
+        args.state_scribe = Some(StateScribe::spawn(state_scribe));
 
 
         Ok(args)

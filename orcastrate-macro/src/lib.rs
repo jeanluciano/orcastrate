@@ -102,7 +102,7 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 // Use serde_json from main crate? Assume it's available.
                 let serialized_args = ::serde_json::to_string(&args)
                     .map_err(|e| ::orcastrate::worker::WorkerError(format!("Args serialization failed: {}", e)))?;
-                let message = ::orcastrate::messages::SubmitTaskArgs {
+                let message = ::orcastrate::messages::SubmitTask {
                     task_name: self.task_name.clone(),
                     args: serialized_args,
                 };

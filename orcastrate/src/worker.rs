@@ -1,5 +1,5 @@
 use crate::messages::{
-    OrcaMessage, OrcaReply, Recipient, RunTask, ScheduleTask, SubmitTask, SubmitTaskArgs,
+    OrcaMessage, OrcaReply, Recipient, RunTask, ScheduleTask, SubmitTask,
     TransitionState,
 };
 use crate::task::{ RunState, Scheduled, StaticTaskDefinition, Submitted, TaskRun};
@@ -143,48 +143,13 @@ impl Message<ScheduleTask> for Worker {
     }
 }
 
+
+
 impl Message<SubmitTask> for Worker {
     type Reply = Result<(), WorkerError>;
-
     async fn handle(
         &mut self,
         message: SubmitTask,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let task_id = Uuid::new_v4();
-        if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
-            info!("Submitting task: {}:{}", message.task_name, task_id);
-            let res = self
-                .processor
-                .as_ref()
-                .unwrap()
-                .ask(OrcaMessage {
-                    message: TransitionState {
-                        task_name: message.task_name,
-                        task_id: task_id,
-                        new_state: RunState::Submitted(Submitted {
-                            max_retries: 0,
-                            args: message.args,
-                        }),
-                    },
-                    recipient: Recipient::Processor,
-                })
-                .await;
-            Ok(())
-        } else {
-            Err(WorkerError(format!(
-                "Task {} not registered",
-                message.task_name
-            )))
-        }
-    }
-}
-
-impl Message<SubmitTaskArgs> for Worker {
-    type Reply = Result<(), WorkerError>;
-    async fn handle(
-        &mut self,
-        message: SubmitTaskArgs,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         println!("Submitting task: {}", message.task_name);
@@ -226,7 +191,6 @@ impl Message<RunTask> for Worker {
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let name = &message.task_name;
-        info!("___Running task___: {}", name);
         let orca = TaskRun::new(
             message.task_id,
             name.to_string(),
@@ -249,7 +213,6 @@ impl std::fmt::Display for WorkerError {
     }
 }
 
-// Implement From<String> to allow `?` to convert String errors
 impl From<String> for WorkerError {
     fn from(s: String) -> Self {
         WorkerError(s)

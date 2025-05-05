@@ -15,24 +15,21 @@ use serde_json;
 // For now, let's assume they are accessible via super::
 use super::{Processor, TASK_GROUP_KEY, TASK_RUN_STREAM_KEY};
 
-pub struct TaskRunner {
+pub struct StateScribe {
     id: Uuid,
     redis: MultiplexedConnection,
-    processor: ActorRef<Processor>, // Keep processor ref if needed for communication back
     worker: ActorRef<Worker>,
 }
 
-impl TaskRunner {
+impl StateScribe {
     pub async fn new(
         id: Uuid,
         redis: MultiplexedConnection,
-        processor: ActorRef<Processor>,
         worker: ActorRef<Worker>,
     ) -> Self {
         Self {
             id,
             redis,
-            processor,
             worker,
         }
     }
@@ -43,7 +40,7 @@ impl TaskRunner {
         worker: ActorRef<Worker>,
         // processor: ActorRef<Processor>, // Add processor back if direct communication is needed
     ) {
-        info!("TaskRunner starting processing loop for {}", id);
+        info!("StateScribe starting processing loop for {}", id);
         let consumer_id = id.to_string();
         let opts = StreamReadOptions::default()
             .group(TASK_GROUP_KEY, &consumer_id)
@@ -100,7 +97,7 @@ impl TaskRunner {
         match Self::parse_transition_state(map) {
             Ok(transition) => {
                 info!(
-                    "TaskRunner processing task: {}, state: {:?}",
+                    "StateScribe processing task: {}, state: {:?}",
                     transition.task_id, transition.new_state
                 );
                 match transition.new_state {
@@ -116,7 +113,7 @@ impl TaskRunner {
                         // Handle potential send error?
                     }
                     _ => {
-                        println!("TaskRunner processing other state: {:?}", transition.new_state);
+                        println!("StateScribe processing other state: {:?}", transition.new_state);
                         // Handle potential ask error?
                     }
                 }
@@ -161,7 +158,7 @@ impl TaskRunner {
     }
 
     pub async fn write_transition(&mut self, message: TransitionState) -> RedisResult<String> {
-        info!("TaskRunner writing transition message: {:?}", message);
+        info!("StateScribe writing transition message: {:?}", message);
         
         // Serialize the entire RunState enum to JSON
         let state_data_str = serde_json::to_string(&message.new_state)
@@ -187,7 +184,7 @@ impl TaskRunner {
 }
 
 
-impl Message<TransitionState> for TaskRunner {
+impl Message<TransitionState> for StateScribe {
     type Reply = Result<(), RedisError>;
 
     async fn handle(
@@ -199,11 +196,11 @@ impl Message<TransitionState> for TaskRunner {
         Ok(())
     }
 }
-impl Actor for TaskRunner {
+impl Actor for StateScribe {
     type Args = Self;
     type Error = RedisError;
     async fn on_start(args: Self::Args, _actor_ref: ActorRef<Self>) -> Result<Self, Self::Error> {
-        debug!("TaskRunner actor starting for ID: {}", args.id);
+        debug!("StateScribe actor starting for ID: {}", args.id);
         let id = args.id;
         let redis_clone = args.redis.clone();
         let worker_clone = args.worker.clone();
@@ -211,7 +208,7 @@ impl Actor for TaskRunner {
 
         // Spawn the stream processing loop as a separate, long-running task
         tokio::spawn(async move {
-            TaskRunner::run_task_processing_loop(
+            StateScribe::run_task_processing_loop(
                 id,
                 redis_clone,
                 worker_clone, /*, processor_clone */
