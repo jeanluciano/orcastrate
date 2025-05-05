@@ -19,7 +19,6 @@ pub struct ScheduleTask {
     pub task_name: String,
     pub scheduled_at: i64,
 }
-
 pub struct TaskCompleted {
     pub result_string: String,
 }
@@ -29,11 +28,6 @@ pub struct OrcaReply {
     pub success: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct OrcaMessage<M> {
-    pub message: M,
-    pub recipient: Recipient,
-}
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransitionState {
     pub task_name: String,

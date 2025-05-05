@@ -121,6 +121,12 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 }
             }
+            pub async fn result(&self,timeout: Option<Duration>) -> Result<&Self, ::orcastrate::worker::WorkerError> {
+                todo!()
+            }
+            pub async fn status(&self) -> Result<&Self, ::orcastrate::worker::WorkerError> {
+                todo!()
+            }
         }
     };
 

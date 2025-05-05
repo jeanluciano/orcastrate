@@ -22,6 +22,3 @@ croner = "2.1.0"
 orcastrate-macro = {version="*", path = "../orcastrate-macro"}
 inventory = "0.3.20"
 thiserror = "2.0.12"
-
-[build-dependencies]
-capnpc = "0.14"

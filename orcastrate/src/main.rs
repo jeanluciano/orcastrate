@@ -1,5 +1,4 @@
 use orcastrate::worker::Worker;
-
 use orcastrate_macro::orca_task;
 use tokio::time::Duration;
 
@@ -17,6 +16,7 @@ async fn my_async_task(url: String, count: i32) -> Result<String, String> {
 
 #[orca_task]
 async fn returns_int() -> Result<i32, String> {
+    tokio::time::sleep(Duration::from_secs(4)).await;
     Ok(42)
 }
 

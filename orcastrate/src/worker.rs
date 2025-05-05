@@ -1,8 +1,5 @@
-use crate::messages::{
-    OrcaMessage, OrcaReply, Recipient, RunTask, ScheduleTask, SubmitTask,
-    TransitionState,
-};
-use crate::task::{ RunState, Scheduled, StaticTaskDefinition, Submitted, TaskRun};
+use crate::messages::{OrcaReply, RunTask, ScheduleTask, SubmitTask, TransitionState};
+use crate::task::{RunState, Scheduled, StaticTaskDefinition, Submitted, TaskRun};
 
 use crate::processors::redis::Processor;
 use inventory;
@@ -81,6 +78,8 @@ impl Message<TransitionState> for Worker {
     }
 }
 
+// Message handlers
+
 impl Message<ScheduleTask> for Worker {
     type Reply = Result<(), WorkerError>;
 
@@ -94,17 +93,15 @@ impl Message<ScheduleTask> for Worker {
         let scheduled_at = message.scheduled_at;
         let task = self.registered_tasks.get_mut(&task_name).unwrap();
         let res = self.processor.as_ref().unwrap().ask(TransitionState {
-                task_name: task_name,
-                task_id: task_id,
-                new_state: RunState::Scheduled(Scheduled {
-                    delay: scheduled_at as u64,
-                }),
-            });
+            task_name: task_name,
+            task_id: task_id,
+            new_state: RunState::Scheduled(Scheduled {
+                delay: scheduled_at as u64,
+            }),
+        });
         Ok(())
     }
 }
-
-
 
 impl Message<SubmitTask> for Worker {
     type Reply = Result<(), WorkerError>;

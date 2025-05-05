@@ -1,7 +1,5 @@
 use crate::messages::*;
-use crate::types::*;
 use crate::worker::Worker;
-use async_trait::async_trait;
 use kameo::Actor;
 use kameo::prelude::{ActorRef, ActorStopReason, Context, Message, WeakActorRef};
 use serde::{Deserialize, Serialize};
@@ -10,6 +8,8 @@ use std::pin::Pin;
 use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
+
+
 pub type TaskFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 pub type SerializedTaskFuture = fn(String) -> Result<TaskFuture, OrcaError>;
 
@@ -114,15 +114,21 @@ impl Actor for TaskRun {
         let serialized_args = match &args.state {
             RunState::Submitted(submitted_state) => {
                 if submitted_state.args.is_empty() && !args.name.ends_with("returns_int") {
-                    eprintln!("Warning: Task {} started with potentially empty args: '{}'", task_id, submitted_state.args);
+                    eprintln!(
+                        "Warning: Task {} started with potentially empty args: '{}'",
+                        task_id, submitted_state.args
+                    );
                 }
                 submitted_state.args.clone()
             }
-            _ => return Err(OrcaError(format!(
-                "Task {} started in unexpected state: {}", task_id, args.state
-            ))),
+            _ => {
+                return Err(OrcaError(format!(
+                    "Task {} started in unexpected state: {}",
+                    task_id, args.state
+                )));
+            }
         };
-
+        // This is the reason that the future is optional.
         if let Some(future) = args.future.take() {
             let handle = tokio::spawn(async move {
                 info!("Attempting to create future for task {}", task_id);
@@ -176,6 +182,8 @@ impl Actor for TaskRun {
     }
 }
 
+// Message handlers
+
 impl Message<TransitionState> for TaskRun {
     type Reply = OrcaReply;
 
@@ -225,9 +233,9 @@ impl Message<TaskCompleted> for TaskRun {
                 task_name: self.name.clone(),
                 task_id: self.id,
                 new_state: RunState::Completed(Completed {
-                        params: vec![],
-                        result: message.result_string.clone(),
-                    }),
+                    params: vec![],
+                    result: message.result_string.clone(),
+                }),
             })
             .await;
 
