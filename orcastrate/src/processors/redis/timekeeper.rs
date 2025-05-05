@@ -1,14 +1,12 @@
+use super::{Processor, TASK_GROUP_KEY, TASK_SCHEDULED_STREAM_KEY};
 use crate::messages::*;
 use kameo::Actor;
 use kameo::prelude::{ActorRef, Context, Message};
 use redis::aio::MultiplexedConnection;
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, RedisError};
+use tracing::{debug, info};
 use uuid::Uuid;
-use tracing::{info, debug};
-use super::{Processor, TASK_GROUP_KEY, TASK_SCHEDULED_STREAM_KEY};
-use crate::task::{RunState, Submitted};
-
 
 pub struct TimeKeeper {
     id: Uuid,
@@ -17,8 +15,16 @@ pub struct TimeKeeper {
 }
 
 impl TimeKeeper {
-    pub async fn new(id: Uuid, redis: MultiplexedConnection, processor: ActorRef<Processor>) -> Self {
-        Self { id, redis, processor }
+    pub async fn new(
+        id: Uuid,
+        redis: MultiplexedConnection,
+        processor: ActorRef<Processor>,
+    ) -> Self {
+        Self {
+            id,
+            redis,
+            processor,
+        }
     }
 
     // Placeholder for handling scheduled tasks
@@ -27,11 +33,11 @@ impl TimeKeeper {
         // TODO: Implement scheduling logic (e.g., writing to TASK_SCHEDULED_STREAM_KEY)
     }
 
-    pub async fn schedule_task(&mut self, task_name: &str, task_id: Uuid, scheduled_at: u64) {
-        let scheduled_at_str = scheduled_at.to_string();
+    pub async fn schedule_task(&mut self, script: ScheduledScript) {
+        let scheduled_at_str = script.scheduled_at.to_string();
         let key_values: &[(&str, &str)] = &[
-            ("task_name", &task_name),
-            ("task_id", &task_id.to_string()),
+            ("task_name", &script.task_name),
+            ("task_id", &script.id.to_string()),
             ("scheduled_at", &scheduled_at_str),
         ];
         let res = self
@@ -84,16 +90,19 @@ impl TimeKeeper {
                                 let schedeled_at = scheduled_at_str
                                     .parse::<u128>()
                                     .expect("scheduled_at not a valid u128");
+                                let args_val = message
+                                    .map
+                                    .get("args")
+                                    .expect("Missing args in stream message");
+                                let args: Option<String> = redis::from_redis_value(args_val)
+                                    .expect("args not a valid string");
                                 let now = tokio::time::Instant::now().elapsed().as_millis();
                                 if now >= schedeled_at {
                                     let send_result = processor
-                                        .tell(TransitionState {
+                                        .tell(Script {
+                                            id: task_id,
                                             task_name: task_name_str,
-                                            task_id,
-                                            new_state: RunState::Submitted(Submitted {
-                                                    max_retries: 0,
-                                                    args: "".to_string(),
-                                                }),
+                                            args: args,
                                         })
                                         .await;
                                 }
@@ -110,23 +119,15 @@ impl TimeKeeper {
     }
 }
 
-impl Message<TransitionState> for TimeKeeper {
+impl Message<ScheduledScript> for TimeKeeper {
     type Reply = OrcaReply;
 
     async fn handle(
         &mut self,
-        message: TransitionState,
+        message: ScheduledScript,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        match message.new_state {
-            RunState::Scheduled(_) => {
-               self.handle_scheduled(message).await;
-            }
-            _ => {
-                // Should not receive other states, but log if it happens
-                info!("TimeKeeper received unexpected state: {:?} for task: {:?}", message.new_state, message.task_id);
-            }
-        }
+        self.schedule_task(message).await;
         OrcaReply { success: true }
     }
 }

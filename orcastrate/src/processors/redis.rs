@@ -1,11 +1,9 @@
 use crate::messages::*;
-use crate::task::RunState;
 use crate::worker::Worker;
 use kameo::Actor;
 use kameo::prelude::*;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
-use redis::streams::StreamReadReply;
 use redis::{RedisError, RedisResult};
 use tracing::debug;
 use tracing::info;
@@ -34,64 +32,6 @@ pub struct Processor {
     gatekeeper: Option<ActorRef<GateKeeper>>,
 }
 
-impl Message<TransitionState> for Processor {
-    type Reply = OrcaReply;
-
-    async fn handle(
-        &mut self,
-        message: TransitionState,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        match message.new_state {
-            RunState::Submitted(ref state) => {
-                info!(
-                    "Processor handling state {:?}: {:?}",
-                    message.new_state, message.task_id
-                );
-                let task_id = message.task_id;
-                let message = TransitionState {
-                    task_name: message.task_name,
-                    task_id: task_id,
-                    new_state: RunState::Submitted(state.clone()),
-                };
-                let res = self.gatekeeper.as_ref().unwrap().ask(message).await;
-                if let Err(e) = res {
-                    eprintln!("Error writing state to results stream: {:?}", e);
-                    return OrcaReply { success: false };
-                }
-            }
-            RunState::Scheduled(_) => {
-                info!(
-                    "Processor forwarding scheduled state: {:?}",
-                    message.task_id
-                );
-                if let Some(timekeeper) = &self.timekeeper {
-                    // Forward the message to the scheduler actor
-                    let send_result = timekeeper.tell(message).await;
-                    if let Err(e) = send_result {
-                        eprintln!("Error sending message to scheduler: {:?}", e);
-                        return OrcaReply { success: false };
-                    }
-                } else {
-                    eprintln!(
-                        "Scheduler actor not available for task: {:?}",
-                        message.task_id
-                    );
-                    return OrcaReply { success: false };
-                }
-            }
-            _ => {
-                info!(
-                    "Processor received unhandled state: {:?}",
-                    message.new_state
-                );
-            }
-        }
-        OrcaReply { success: true }
-    }
-}
-
-#[messages]
 impl Processor {
     pub async fn new(id: Uuid, redis_url: &str, worker: ActorRef<Worker>) -> Self {
         let client = redis::Client::open(redis_url).unwrap();
@@ -169,5 +109,45 @@ impl Actor for Processor {
         args.gatekeeper = Some(GateKeeper::spawn(gatekeeper));
 
         Ok(args)
+    }
+}
+
+impl Message<Script> for Processor {
+    type Reply = Result<(), RedisError>;
+
+    async fn handle(
+        &mut self,
+        message: Script,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        info!("Processor received Script_______: {:?}", &message);
+        self.gatekeeper.as_ref().unwrap().tell(message).await;
+        Ok(())
+    }
+}
+
+impl Message<ScheduledScript> for Processor {
+    type Reply = OrcaReply;
+
+    async fn handle(
+        &mut self,
+        message: ScheduledScript,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.timekeeper.as_ref().unwrap().tell(message).await;
+        OrcaReply { success: true }
+    }
+}
+
+impl Message<TransitionState> for Processor {
+    type Reply = OrcaReply;
+
+    async fn handle(
+        &mut self,
+        message: TransitionState,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        info!("Processor received TransitionState: {:?}", message);
+        OrcaReply { success: true }
     }
 }

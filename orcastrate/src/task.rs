@@ -29,6 +29,9 @@ pub struct TaskRun {
     state: RunState,
     handle: Option<JoinHandle<()>>,
     pub worker: ActorRef<Worker>,
+    pub args: Option<String>,
+    max_retries: u32,
+    result: Option<String>,
 }
 
 impl TaskRun {
@@ -37,26 +40,27 @@ impl TaskRun {
         name: String,
         worker: ActorRef<Worker>,
         future: Option<SerializedTaskFuture>,
-        args: String,
-    ) -> Self {
-        let state = Submitted::new(0, args);
-        Self {
+        args: Option<String>,
+        max_retries: Option<u32>,
+    ) -> ActorRef<TaskRun> {
+        let args = Self {
             id,
             future,
-            state: RunState::Submitted(state),
+            state: RunState::Running,
             worker,
             name: name,
             handle: None,
-        }
+            args: args,
+            max_retries: max_retries.unwrap_or(0),
+            result: None,
+        };
+        let task = TaskRun::spawn(args);
+        task
     }
     async fn transition_to_state(&mut self, new_state_request: RunState) -> Result<(), OrcaError> {
         let next_state_type = match (&self.state, new_state_request) {
-            (RunState::Submitted(_), RunState::Running(_)) => Ok(RunState::Running(Running {})),
-            (RunState::Scheduled(_), RunState::Running(_)) => Ok(RunState::Running(Running {})),
-            (RunState::Running(_), RunState::Completed(_)) => Ok(RunState::Completed(Completed {
-                params: vec![],
-                result: "".to_string(),
-            })),
+            (RunState::Running, RunState::Completed) => Ok(RunState::Completed),
+            (RunState::Running, RunState::Failed) => Ok(RunState::Failed),
             (current, target) => {
                 let err_msg = format!(
                     "Invalid state transition from {} to {:?} for Task {}",
@@ -83,7 +87,9 @@ impl TaskRun {
                     .tell(TransitionState {
                         task_name: self.name.clone(),
                         task_id: self.id,
+                        args: self.args.clone().unwrap_or("".to_string()),
                         new_state: self.state.clone(),
+                        result: self.result.clone(),
                     })
                     .await
                     .map_err(|e| {
@@ -111,42 +117,17 @@ impl Actor for TaskRun {
         let self_ref = actor_ref.clone();
         let task_id = args.id.clone();
 
-        let serialized_args = match &args.state {
-            RunState::Submitted(submitted_state) => {
-                if submitted_state.args.is_empty() && !args.name.ends_with("returns_int") {
-                    eprintln!(
-                        "Warning: Task {} started with potentially empty args: '{}'",
-                        task_id, submitted_state.args
-                    );
-                }
-                submitted_state.args.clone()
-            }
-            _ => {
-                return Err(OrcaError(format!(
-                    "Task {} started in unexpected state: {}",
-                    task_id, args.state
-                )));
-            }
-        };
+        let serialized_args = args.args.clone();
         // This is the reason that the future is optional.
         if let Some(future) = args.future.take() {
             let handle = tokio::spawn(async move {
                 info!("Attempting to create future for task {}", task_id);
-                match future(serialized_args) {
+                match future(serialized_args.unwrap_or("".to_string())) {
                     Ok(task_future) => {
                         info!("Executing future for task {}", task_id);
                         let result = task_future.await;
                         info!("Future completed for task {}: {:?}", task_id, result);
-
-                        let result_string = match result {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("Task {} future execution failed: {}", task_id, e);
-                                format!(r#"{{"error": "{}"}}"#, e.replace('"', "\\\""))
-                            }
-                        };
-
-                        let completion_msg = TaskCompleted { result_string };
+                        let completion_msg = FutureResult { result: result };
                         if let Err(e) = self_ref.tell(completion_msg).await {
                             eprintln!(
                                 "Failed to send internal completion message for task {}: {}",
@@ -202,51 +183,46 @@ impl Message<TransitionState> for TaskRun {
     }
 }
 
-impl Message<TaskCompleted> for TaskRun {
-    type Reply = ();
+
+#[derive(Debug)]
+struct FutureResult {
+    result: Result<String, String>, // Carries Ok(value) or Err(reason)
+}
+
+
+impl Message<FutureResult> for TaskRun {
+    type Reply = (); // No reply needed
 
     async fn handle(
         &mut self,
-        message: TaskCompleted,
+        message: FutureResult,
         _ctx: &mut Context<TaskRun, Self::Reply>,
     ) -> Self::Reply {
-        match self
-            .transition_to_state(RunState::Completed(Completed {
-                params: vec![],
-                result: message.result_string.clone(),
-            }))
-            .await
-        {
-            Ok(_) => (),
-            Err(e) => {
-                eprintln!("State transition failed for Task {}: {}", self.id, e);
+        info!("Received internal result for task {}: {:?}", self.id, message.result.is_ok());
+        let final_state;
+        match message.result {
+            Ok(res_str) => {
+                self.result = Some(res_str);
+                final_state = RunState::Completed;
+            }
+            Err(err_str) => {
+                let error_json = format!(r#"{{"error": "{}"}}"#, err_str.replace('"', "\\\""));
+                self.result = Some(error_json);
+                final_state = RunState::Failed;
             }
         }
 
-        // 2. Log the completion internally
-        info!("Internal state updated to Completed for task {}", self.id);
-
-        // 3. Notify the worker/processor about the external state change
-        let notify_result = self
-            .worker
-            .tell(TransitionState {
-                task_name: self.name.clone(),
-                task_id: self.id,
-                new_state: RunState::Completed(Completed {
-                    params: vec![],
-                    result: message.result_string.clone(),
-                }),
-            })
-            .await;
-
-        if let Err(e) = notify_result {
-            eprintln!(
-                "Failed to notify worker of task {} completion: {}",
-                self.id, e
-            );
+        match self.transition_to_state(final_state.clone()).await {
+            Ok(_) => {
+                info!("Internal state updated to {} for task {}", final_state, self.id);
+            }
+            Err(e) => {
+                eprintln!("State transition to {} failed for Task {}: {}", final_state, self.id, e);
+            }
         }
     }
 }
+
 
 #[derive(Debug)]
 pub struct OrcaError(pub String);
@@ -261,11 +237,9 @@ impl std::error::Error for OrcaError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RunState {
-    Submitted(Submitted),
-    Scheduled(Scheduled),
-    Running(Running),
-    Completed(Completed),
-    Failed(Failed),
+    Running,
+    Completed,
+    Failed,
 }
 
 impl std::fmt::Display for RunState {
@@ -274,79 +248,22 @@ impl std::fmt::Display for RunState {
     }
 }
 
-pub enum RunStateEnum {
-    Submitted,
-    Scheduled,
-    Running,
-    Completed,
-    Failed,
-}
-
 impl RunState {
     pub fn to_string(&self) -> String {
         match self {
-            RunState::Submitted(_state) => "Submitted".to_string(),
-            RunState::Scheduled(_state) => "Scheduled".to_string(),
-            RunState::Running(_state) => "Running".to_string(),
-            RunState::Completed(_state) => "Completed".to_string(),
-            RunState::Failed(_state) => "Failed".to_string(),
-        }
-    }
-    pub fn to_orca_state_enum(&self) -> RunStateEnum {
-        match self {
-            RunState::Submitted(_) => RunStateEnum::Submitted,
-            RunState::Scheduled(_) => RunStateEnum::Scheduled,
-            RunState::Running(_) => RunStateEnum::Running,
-            RunState::Completed(_) => RunStateEnum::Completed,
-            RunState::Failed(_) => RunStateEnum::Failed,
+            RunState::Running => "Running".to_string(),
+            RunState::Completed => "Completed".to_string(),
+            RunState::Failed => "Failed".to_string(),
         }
     }
     pub fn from_string(s: &str) -> Option<RunState> {
         match s {
-            "Submitted" => Some(RunState::Submitted(Submitted::new(0, "".to_string()))),
-            "Scheduled" => Some(RunState::Scheduled(Scheduled { delay: 0 })),
-            "Running" => Some(RunState::Running(Running {})),
-            "Completed" => Some(RunState::Completed(Completed {
-                params: vec![],
-                result: "".to_string(),
-            })),
-            "Failed" => Some(RunState::Failed(Failed {
-                params: vec![],
-                error: "".to_string(),
-            })),
+            "Running" => Some(RunState::Running),
+            "Completed" => Some(RunState::Completed),
+            "Failed" => Some(RunState::Failed),
             _ => None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Submitted {
-    pub max_retries: u32,
-    pub args: String,
-}
 
-impl Submitted {
-    pub fn new(max_retries: u32, args: String) -> Self {
-        Self { max_retries, args }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Scheduled {
-    pub delay: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Running {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Completed {
-    pub params: Vec<String>,
-    pub result: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Failed {
-    pub params: Vec<String>,
-    pub error: String,
-}

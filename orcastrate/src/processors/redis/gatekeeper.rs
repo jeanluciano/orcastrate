@@ -1,14 +1,14 @@
 use crate::messages::*;
-use crate::worker::Worker;
 use crate::task::RunState;
+use crate::worker::Worker;
 use kameo::prelude::*;
 use redis::aio::MultiplexedConnection;
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, RedisError, RedisResult};
+use serde_json;
 use std::collections::HashMap;
 use tracing::{debug, info};
 use uuid::Uuid;
-use serde_json;
 
 // Assuming these constants are defined in the parent module (redis.rs or redis/mod.rs)
 // If not, they need to be defined here or passed in.
@@ -22,19 +22,11 @@ pub struct GateKeeper {
 }
 
 impl GateKeeper {
-    pub async fn new(
-        id: Uuid,
-        redis: MultiplexedConnection,
-        worker: ActorRef<Worker>,
-    ) -> Self {
-        Self {
-            id,
-            redis,
-            worker,
-        }
+    pub async fn new(id: Uuid, redis: MultiplexedConnection, worker: ActorRef<Worker>) -> Self {
+        Self { id, redis, worker }
     }
 
-    async fn run_task_processing_loop(
+    async fn run_script_processing_loop(
         id: Uuid,
         mut redis: MultiplexedConnection,
         worker: ActorRef<Worker>,
@@ -58,13 +50,7 @@ impl GateKeeper {
                         let stream = &messages.keys[0];
                         if !stream.ids.is_empty() {
                             for message in &stream.ids {
-                                Self::process_message(
-                                    &worker,
-                                    &message.map,
-                                    &mut redis,
-                                    &message.id,
-                                )
-                                .await;
+                                Self::process_message(&worker, &message.map).await;
                                 // Acknowledge the message after processing
                                 let _ack: RedisResult<i64> = redis
                                     .xack(TASK_RUN_STREAM_KEY, TASK_GROUP_KEY, &[&message.id])
@@ -88,94 +74,50 @@ impl GateKeeper {
         }
     }
 
-    async fn process_message(
-        worker: &ActorRef<Worker>,
-        map: &HashMap<String, redis::Value>,
-        redis_conn: &mut MultiplexedConnection,
-        message_id: &str,
-    ) {
-        match Self::parse_transition_state(map) {
-            Ok(transition) => {
+    async fn process_message(worker: &ActorRef<Worker>, map: &HashMap<String, redis::Value>) {
+        match Self::parse_script(map) {
+            Ok(script) => {
                 info!(
-                    "GateKeeper processing task: {}, state: {:?}",
-                    transition.task_id, transition.new_state
+                    "GateKeeper processing Script: {}, args: {:?}",
+                    script.id, script.args
                 );
-                match transition.new_state {
-                    RunState::Submitted(state) => {
-                        // Assuming RunTask is the message to start execution
-                        let _send_result = worker
-                            .tell(RunTask {
-                                task_name: transition.task_name,
-                                task_id: transition.task_id,
-                                args: state.args,
-                            })
-                            .await;
-                        // Handle potential send error?
-                    }
-                    _ => {
-                        println!("GateKeeper processing other state: {:?}", transition.new_state);
-                        // Handle potential ask error?
-                    }
-                }
+                let _ = worker.tell(script).await;
             }
             Err(e) => {
-                eprintln!(
-                    "Error parsing message {} fields: {:?}. Acknowledging and skipping.",
-                    message_id, e
-                );
-                // Optionally, move to a dead-letter queue instead of just acking
+                eprintln!("Error parsing script: {}", e);
             }
         }
     }
 
-    fn parse_transition_state(
-        map: &HashMap<String, redis::Value>,
-    ) -> Result<TransitionState, String> {
-        let task_id_val = map.get("task_id").ok_or("Missing task_id")?;
+    fn parse_script(map: &HashMap<String, redis::Value>) -> Result<Script, String> {
+        let task_id_val = map.get("id").ok_or("Missing task_id")?;
         let task_id_str: String = redis::from_redis_value(task_id_val)
             .map_err(|e| format!("task_id not string: {}", e))?;
-        let task_id =
-            Uuid::parse_str(&task_id_str).map_err(|e| format!("task_id not UUID: {}", e))?;
+        let id = Uuid::parse_str(&task_id_str).map_err(|e| format!("task_id not UUID: {}", e))?;
 
         let task_name_val = map.get("task_name").ok_or("Missing task_name")?;
         let task_name: String = redis::from_redis_value(task_name_val)
             .map_err(|e| format!("task_name not string: {}", e))?;
 
         // Read the serialized state data
-        let state_data_val = map.get("state_data").ok_or("Missing state_data")?;
-        let state_data_str: String = redis::from_redis_value(state_data_val)
-            .map_err(|e| format!("state_data not string: {}", e))?;
+        let args_val = map.get("args").ok_or("Missing args")?;
+        let args: Option<String> =
+            redis::from_redis_value(args_val).map_err(|e| format!("args not string: {}", e))?;
 
-        // Deserialize the full RunState from the JSON string
-        let new_state: RunState = serde_json::from_str(&state_data_str)
-            .map_err(|e| format!("Failed to deserialize RunState: {}", e))?;
-
-        Ok(TransitionState {
+        Ok(Script {
             task_name,
-            task_id,
-            new_state,
+            id,
+            args,
         })
     }
 
-    pub async fn write_transition(&mut self, message: TransitionState) -> RedisResult<String> {
-        info!("GateKeeper writing transition message: {:?}", message);
-        
-        // Serialize the entire RunState enum to JSON
-        let state_data_str = serde_json::to_string(&message.new_state)
-            .map_err(|e| {
-                // Convert serde error to something RedisResult can represent, e.g., generic error
-                // Ideally, define a custom error type that encompasses both.
-                redis::RedisError::from((redis::ErrorKind::TypeError, "Failed to serialize RunState", e.to_string()))
-            })?;
+    pub async fn publish_script(&mut self, message: Script) -> RedisResult<String> {
+        info!("GateKeeper submitting script: {:?}", message);
 
-        // Get the state type string for potential indexing/filtering (optional but can be useful)
-        let state_type_str = message.new_state.to_string();
-        
         let key_values: &[(&str, String)] = &[
             ("task_name", message.task_name.clone()),
-            ("task_id", message.task_id.to_string()),
-            ("state_type", state_type_str), // Store the type name
-            ("state_data", state_data_str), // Store the serialized state data
+            ("id", message.id.to_string()),
+            ("args", message.args.clone().unwrap_or("".to_string())), // Store the serialized state data
         ];
 
         // Use xadd with Vec<(&str, String)> because values are now owned Strings
@@ -183,19 +125,19 @@ impl GateKeeper {
     }
 }
 
-
-impl Message<TransitionState> for GateKeeper {
+impl Message<Script> for GateKeeper {
     type Reply = Result<(), RedisError>;
 
     async fn handle(
         &mut self,
-        message: TransitionState,
+        message: Script,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let _ = self.write_transition(message).await;
+        let _ = self.publish_script(message).await;
         Ok(())
     }
 }
+
 impl Actor for GateKeeper {
     type Args = Self;
     type Error = RedisError;
@@ -204,11 +146,8 @@ impl Actor for GateKeeper {
         let id = args.id;
         let redis_clone = args.redis.clone();
         let worker_clone = args.worker.clone();
-        // let processor_clone = args.processor.clone(); // Clone if needed for the loop
-
-        // Spawn the stream processing loop as a separate, long-running task
         tokio::spawn(async move {
-            GateKeeper::run_task_processing_loop(
+            GateKeeper::run_script_processing_loop(
                 id,
                 redis_clone,
                 worker_clone, /*, processor_clone */

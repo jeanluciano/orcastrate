@@ -1,5 +1,5 @@
-use crate::messages::{OrcaReply, RunTask, ScheduleTask, SubmitTask, TransitionState};
-use crate::task::{RunState, Scheduled, StaticTaskDefinition, Submitted, TaskRun};
+use crate::messages::{OrcaReply, RunTask, ScheduleTask, Script, ScheduledScript, SubmitTask, TransitionState};
+use crate::task::{RunState, StaticTaskDefinition, TaskRun};
 
 use crate::processors::redis::Processor;
 use inventory;
@@ -60,23 +60,6 @@ impl Actor for Worker {
     }
 }
 
-impl Message<TransitionState> for Worker {
-    type Reply = OrcaReply;
-    async fn handle(
-        &mut self,
-        message: TransitionState,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let res = self.processor.as_ref().unwrap().ask(message).await;
-        match res {
-            Ok(reply) => reply,
-            Err(e) => {
-                eprintln!("Error handling transition state: {}", e);
-                OrcaReply { success: false }
-            }
-        }
-    }
-}
 
 // Message handlers
 
@@ -92,12 +75,11 @@ impl Message<ScheduleTask> for Worker {
         let task_name = message.task_name.clone();
         let scheduled_at = message.scheduled_at;
         let task = self.registered_tasks.get_mut(&task_name).unwrap();
-        let res = self.processor.as_ref().unwrap().ask(TransitionState {
+        let res = self.processor.as_ref().unwrap().ask(ScheduledScript {
+            id: task_id,
             task_name: task_name,
-            task_id: task_id,
-            new_state: RunState::Scheduled(Scheduled {
-                delay: scheduled_at as u64,
-            }),
+            args: None,
+            scheduled_at: scheduled_at,
         });
         Ok(())
     }
@@ -112,19 +94,17 @@ impl Message<SubmitTask> for Worker {
     ) -> Self::Reply {
         println!("Submitting task: {}", message.task_name);
         let task_id = Uuid::new_v4();
+        info!("((((((args: {:?}", message.args);
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
             info!("Submitting task: {}:{}", message.task_name, task_id);
             let res = self
                 .processor
                 .as_ref()
                 .unwrap()
-                .ask(TransitionState {
+                .ask(Script {
+                    id: task_id,
                     task_name: message.task_name,
-                    task_id: task_id,
-                    new_state: RunState::Submitted(Submitted {
-                        max_retries: 0,
-                        args: message.args,
-                    }),
+                    args: Some(message.args),
                 })
                 .await;
             Ok(())
@@ -137,25 +117,55 @@ impl Message<SubmitTask> for Worker {
     }
 }
 
-impl Message<RunTask> for Worker {
+
+impl Message<TransitionState> for Worker {
     type Reply = Result<(), WorkerError>;
 
     async fn handle(
         &mut self,
-        message: RunTask,
+        message: TransitionState,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let res = self.processor.as_ref().unwrap().ask(message).await;
+        match res {
+            Ok(reply) => Ok(()),
+            Err(e) => {
+                eprintln!("Error handling transition state: {}", e);
+                Err(WorkerError(e.to_string()))
+            }
+        }
+    }
+}
+
+impl Message<Script> for Worker {
+    type Reply = Result<(), WorkerError>;
+
+    async fn handle(
+        &mut self,
+        message: Script,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let name = &message.task_name;
-        let orca = TaskRun::new(
-            message.task_id,
-            name.to_string(),
-            ctx.actor_ref(),
-            Some(self.registered_tasks.get(name).unwrap().task_future.clone()),
-            message.args,
-        );
-        let actor_ref = TaskRun::spawn(orca);
-        self.task_runs.insert(message.task_id, actor_ref);
-        Ok(())
+        let id = message.id;
+        let args = message.args.clone();
+        info!("_________Worker received script: {:?}", &message);
+        if let Some(orca) = self.registered_tasks.get(name) {
+            let orca = TaskRun::new(
+                id,
+                name.to_string(),
+                ctx.actor_ref(),
+                Some(orca.task_future.clone()),
+                args,
+                None,
+            );
+            self.task_runs.insert(id, orca);
+            Ok(())
+        } else {
+            Err(WorkerError(format!(
+                "Task {} not registered",
+                message.task_name
+            )))
+        }
     }
 }
 
