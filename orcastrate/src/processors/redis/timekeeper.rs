@@ -1,4 +1,4 @@
-use super::{Processor, TASK_GROUP_KEY, TASK_SCHEDULED_STREAM_KEY};
+use super::{Processor, TASK_GROUP_KEY, TIMEKEEPER_STREAM_KEY};
 use crate::messages::*;
 use kameo::Actor;
 use kameo::prelude::{ActorRef, Context, Message};
@@ -15,16 +15,16 @@ pub struct TimeKeeper {
 }
 
 impl TimeKeeper {
-    pub async fn new(
+    pub fn new(
         id: Uuid,
         redis: MultiplexedConnection,
         processor: ActorRef<Processor>,
-    ) -> Self {
-        Self {
+    ) -> ActorRef<Self> {
+        TimeKeeper::spawn(Self {
             id,
             redis,
             processor,
-        }
+        })
     }
 
     // Placeholder for handling scheduled tasks
@@ -42,7 +42,7 @@ impl TimeKeeper {
         ];
         let res = self
             .redis
-            .xadd::<&str, &str, &str, &str, String>(TASK_SCHEDULED_STREAM_KEY, "*", &key_values)
+            .xadd::<&str, &str, &str, &str, String>(TIMEKEEPER_STREAM_KEY, "*", &key_values)
             .await;
     }
 
@@ -58,7 +58,7 @@ impl TimeKeeper {
 
         loop {
             let messages_result: Result<StreamReadReply, RedisError> = redis
-                .xread_options(&[&TASK_SCHEDULED_STREAM_KEY], &[">"], &opts)
+                .xread_options(&[&TIMEKEEPER_STREAM_KEY], &[">"], &opts)
                 .await;
             match messages_result {
                 Ok(messages) => {

@@ -1,10 +1,13 @@
-use crate::messages::{OrcaReply, RunTask, ScheduleTask, Script, ScheduledScript, SubmitTask, TransitionState};
-use crate::task::{RunState, StaticTaskDefinition, TaskRun};
-
+use crate::messages::{
+    GetResult, ScheduleTask, ScheduledScript, Script, SubmitRun, TransitionState,
+};
 use crate::processors::redis::Processor;
+use crate::task::{RunHandle, RunState, StaticTaskDefinition, TaskRun};
 use inventory;
 use kameo::Actor;
+use kameo::prelude::SendError;
 use kameo::prelude::{ActorRef, Context, Message};
+use redis::RedisError;
 use std::collections::HashMap;
 use thiserror::Error;
 use tracing::info;
@@ -60,7 +63,6 @@ impl Actor for Worker {
     }
 }
 
-
 // Message handlers
 
 impl Message<ScheduleTask> for Worker {
@@ -85,29 +87,31 @@ impl Message<ScheduleTask> for Worker {
     }
 }
 
-impl Message<SubmitTask> for Worker {
-    type Reply = Result<(), WorkerError>;
+impl Message<SubmitRun> for Worker {
+    type Reply = Result<ActorRef<RunHandle>, WorkerError>;
     async fn handle(
         &mut self,
-        message: SubmitTask,
-        _ctx: &mut Context<Self, Self::Reply>,
+        message: SubmitRun,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        println!("Submitting task: {}", message.task_name);
         let task_id = Uuid::new_v4();
-        info!("((((((args: {:?}", message.args);
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
             info!("Submitting task: {}:{}", message.task_name, task_id);
-            let res = self
+            let task_name = message.task_name.clone();
+            let args = message.args.clone();
+            let _ = self
                 .processor
                 .as_ref()
                 .unwrap()
                 .ask(Script {
                     id: task_id,
                     task_name: message.task_name,
-                    args: Some(message.args),
+                    args: message.args,
                 })
                 .await;
-            Ok(())
+            let run_handle =
+                RunHandle::new(self.processor.as_ref().unwrap().clone(), task_name, args);
+            Ok(run_handle)
         } else {
             Err(WorkerError(format!(
                 "Task {} not registered",
@@ -116,7 +120,6 @@ impl Message<SubmitTask> for Worker {
         }
     }
 }
-
 
 impl Message<TransitionState> for Worker {
     type Reply = Result<(), WorkerError>;
@@ -148,7 +151,7 @@ impl Message<Script> for Worker {
         let name = &message.task_name;
         let id = message.id;
         let args = message.args.clone();
-        info!("_________Worker received script: {:?}", &message);
+        info!("Worker received script: {:?}", &message);
         if let Some(orca) = self.registered_tasks.get(name) {
             let orca = TaskRun::new(
                 id,
@@ -169,6 +172,26 @@ impl Message<Script> for Worker {
     }
 }
 
+impl Message<GetResult> for Worker {
+    type Reply = Result<String, WorkerError>;
+
+    async fn handle(
+        &mut self,
+        message: GetResult,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let res = self.processor.as_ref().unwrap().ask(message).await;
+
+        match res {
+            Ok(result_string) => {
+                info!("Result: {}", &result_string);
+                Ok(result_string)
+            }
+            Err(send_error) => Err(WorkerError::from(send_error)),
+        }
+    }
+}
+
 #[derive(Error, Debug, Clone)]
 pub struct WorkerError(pub String);
 
@@ -181,5 +204,21 @@ impl std::fmt::Display for WorkerError {
 impl From<String> for WorkerError {
     fn from(s: String) -> Self {
         WorkerError(s)
+    }
+}
+
+impl From<RedisError> for WorkerError {
+    fn from(err: RedisError) -> Self {
+        WorkerError(format!("Redis error: {}", err))
+    }
+}
+
+impl<M, E> From<SendError<M, E>> for WorkerError
+where
+    M: std::fmt::Debug,
+    E: std::fmt::Debug,
+{
+    fn from(err: SendError<M, E>) -> Self {
+        WorkerError(format!("Send error: {:?}", err))
     }
 }

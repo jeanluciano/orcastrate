@@ -8,8 +8,8 @@ use std::pin::Pin;
 use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
-
-
+use crate::notify::Register;
+use crate::processors::redis::Processor;
 pub type TaskFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 pub type SerializedTaskFuture = fn(String) -> Result<TaskFuture, OrcaError>;
 
@@ -266,4 +266,69 @@ impl RunState {
     }
 }
 
+
+pub struct  RunHandle {
+    task_name: String,
+    task_id: Uuid,
+    processor_ref: ActorRef<Processor>,
+    args: Option<String>,
+}
+
+impl RunHandle {
+    pub fn new(processor_ref: ActorRef<Processor>, task_name: String, args: Option<String> ) -> ActorRef<RunHandle> {
+        let task_id = Uuid::new_v4();
+        RunHandle::spawn(Self { task_id, processor_ref, task_name, args })
+    }
+}
+
+impl Actor for RunHandle {
+    type Args = Self;
+    type Error = OrcaError;
+
+    async fn on_start(
+        mut args: Self::Args,
+        actor_ref: ActorRef<RunHandle>,
+    ) -> Result<Self, OrcaError> {
+        let recipient = actor_ref.clone();
+        let message = Register(recipient.recipient::<ListenForResult>());
+        let _ = args.processor_ref.tell(message).await;
+        Ok(args)
+    }
+    
+}
+#[derive(Debug)]
+pub struct ListenForResult {
+    task_id: Uuid,
+}
+
+impl Message<ListenForResult> for RunHandle {
+    type Reply = OrcaReply;
+
+    async fn handle(
+        &mut self,
+        message: ListenForResult,
+        _ctx: &mut Context<RunHandle, Self::Reply>,
+    ) -> Self::Reply {
+        info!("Received ListenForResult for task {}", message.task_id);
+        
+        OrcaReply { success: true }
+    }
+}
+
+impl Message<GetResult> for RunHandle {
+    type Reply = Result<String, OrcaError>; 
+
+    async fn handle(
+        &mut self,
+        message: GetResult,
+        _ctx: &mut Context<RunHandle, Self::Reply>,
+    ) -> Self::Reply {
+        let message = GetResult { task_id: self.task_id };
+        let result = self.processor_ref.ask(message).await;
+        match result {
+            Ok(result) => Ok(result),
+            Err(e) => Err(OrcaError(format!("Failed to get result for task {}: {}", self.task_id, e))),
+        }
+    }
+}
 

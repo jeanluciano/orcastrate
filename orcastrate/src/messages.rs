@@ -4,10 +4,18 @@ use uuid::Uuid;
 use crate::task::RunState;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SubmitTask {
+pub struct SubmitRun {
     pub task_name: String,
-    pub args: String,
+    pub args: Option<String>,
+    pub task_id: Uuid,
 } 
+
+#[derive(Debug, Clone)]
+pub struct ScheduleTask {
+    pub task_name: String,
+    pub scheduled_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct RunTask {
     pub task_name: String,
@@ -15,9 +23,8 @@ pub struct RunTask {
     pub args: String,
 }
 #[derive(Debug, Clone)]
-pub struct ScheduleTask {
-    pub task_name: String,
-    pub scheduled_at: i64,
+pub struct GetResult {
+    pub task_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
@@ -50,10 +57,3 @@ pub struct TransitionState {
     pub result: Option<String>,
 }
 
-
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum Recipient {
-    Orca,
-    Processor,
-}

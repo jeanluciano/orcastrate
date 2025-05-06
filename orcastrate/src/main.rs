@@ -25,16 +25,12 @@ async fn main() {
     let worker = Worker::new("redis://localhost:6379".to_string())
         .run()
         .await;
-    let async_task = my_async_task::register(worker.clone());
-    let int_task = returns_int::register(worker.clone());
+    let mut async_task = my_async_task::register(worker.clone());
+    let mut int_task = returns_int::register(worker.clone());
 
-    let int_res = int_task.submit().await;
+    let task_handle = async_task.submit("https://example.com".to_string(), 10).await.unwrap();
 
-
-    let res = async_task
-        .submit("https://example.com".to_string(), 10)
-        .await;
-
+    let result = task_handle.result(None).await.expect("Getting result failed");
 
     println!("Main loop running. Tasks are executing asynchronously...");
     loop {

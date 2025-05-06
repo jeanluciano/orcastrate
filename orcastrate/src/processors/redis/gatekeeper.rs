@@ -13,7 +13,7 @@ use uuid::Uuid;
 // Assuming these constants are defined in the parent module (redis.rs or redis/mod.rs)
 // If not, they need to be defined here or passed in.
 // For now, let's assume they are accessible via super::
-use super::{TASK_GROUP_KEY, TASK_RUN_STREAM_KEY};
+use super::{GATEKEEPER_STREAM_KEY, TASK_GROUP_KEY};
 
 pub struct GateKeeper {
     id: Uuid,
@@ -22,8 +22,8 @@ pub struct GateKeeper {
 }
 
 impl GateKeeper {
-    pub async fn new(id: Uuid, redis: MultiplexedConnection, worker: ActorRef<Worker>) -> Self {
-        Self { id, redis, worker }
+    pub fn new(id: Uuid, redis: MultiplexedConnection, worker: ActorRef<Worker>) -> ActorRef<Self> {
+        GateKeeper::spawn(Self { id, redis, worker })
     }
 
     async fn run_script_processing_loop(
@@ -41,7 +41,7 @@ impl GateKeeper {
 
         loop {
             let messages_result: Result<Option<StreamReadReply>, RedisError> = redis
-                .xread_options(&[TASK_RUN_STREAM_KEY], &[">"], &opts)
+                .xread_options(&[GATEKEEPER_STREAM_KEY], &[">"], &opts)
                 .await;
 
             match messages_result {
@@ -53,7 +53,7 @@ impl GateKeeper {
                                 Self::process_message(&worker, &message.map).await;
                                 // Acknowledge the message after processing
                                 let _ack: RedisResult<i64> = redis
-                                    .xack(TASK_RUN_STREAM_KEY, TASK_GROUP_KEY, &[&message.id])
+                                    .xack(GATEKEEPER_STREAM_KEY, TASK_GROUP_KEY, &[&message.id])
                                     .await;
                             }
                         }
@@ -66,7 +66,7 @@ impl GateKeeper {
                 Err(e) => {
                     eprintln!(
                         "Error reading from Redis stream {}: {:?}. Retrying...",
-                        TASK_RUN_STREAM_KEY, e
+                        GATEKEEPER_STREAM_KEY, e
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 }
@@ -121,7 +121,9 @@ impl GateKeeper {
         ];
 
         // Use xadd with Vec<(&str, String)> because values are now owned Strings
-        self.redis.xadd(TASK_RUN_STREAM_KEY, "*", key_values).await
+        self.redis
+            .xadd(GATEKEEPER_STREAM_KEY, "*", key_values)
+            .await
     }
 }
 

@@ -1,6 +1,5 @@
 use crate::messages::*;
 use crate::worker::Worker;
-use kameo::Actor;
 use kameo::prelude::*;
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
@@ -8,19 +7,20 @@ use redis::{RedisError, RedisResult};
 use tracing::debug;
 use tracing::info;
 use uuid::Uuid;
-
+use crate::notify::Register;
+use crate::task::ListenForResult;
 // Declare modules
 mod gatekeeper;
+mod statekeeper;
 mod timekeeper;
-
 // Use items from modules
 use gatekeeper::GateKeeper;
+use statekeeper::StateKeeper;
 use timekeeper::TimeKeeper;
-
 // Define constants within this file for now
-const TASK_RUN_STREAM_KEY: &str = "orca:streams:tasks:run";
-const TASK_SCHEDULED_STREAM_KEY: &str = "orca:streams:tasks:scheduled";
-const TASK_RESULTS_STREAM_KEY: &str = "orca:streams:tasks:results";
+const GATEKEEPER_STREAM_KEY: &str = "orca:streams:gatekeeper";
+const TIMEKEEPER_STREAM_KEY: &str = "orca:streams:timekeeper";
+const STATEKEEPER_STREAM_KEY: &str = "orca:streams:statekeeper";
 const TASK_GROUP_KEY: &str = "worker";
 
 // Spawns
@@ -30,6 +30,7 @@ pub struct Processor {
     worker: ActorRef<Worker>,
     timekeeper: Option<ActorRef<TimeKeeper>>,
     gatekeeper: Option<ActorRef<GateKeeper>>,
+    statekeeper: Option<ActorRef<StateKeeper>>,
 }
 
 impl Processor {
@@ -42,31 +43,31 @@ impl Processor {
                 "Failed to ensure Redis streams: {:?}. Processor initialization might fail.",
                 e
             );
-            // Depending on severity, might want to panic or handle differently
         }
         Self {
             id,
             redis,
             worker,
             timekeeper: None,
-            gatekeeper: None, // Initialize runner as None
+            gatekeeper: None,
+            statekeeper: None,
         }
     }
 
     async fn ensure_streams(redis: &mut MultiplexedConnection) -> Result<(), RedisError> {
         // Use the constants defined in this module
-        let task_run_res: RedisResult<String> = redis
-            .xgroup_create_mkstream(TASK_RUN_STREAM_KEY, TASK_GROUP_KEY, "$") // Use $ instead of 0 to ignore history
+        let gatekeeper_res: RedisResult<String> = redis
+            .xgroup_create_mkstream(GATEKEEPER_STREAM_KEY, TASK_GROUP_KEY, "$") // Use $ instead of 0 to ignore history
             .await;
-        let scheduled_res: RedisResult<String> = redis
-            .xgroup_create_mkstream(TASK_SCHEDULED_STREAM_KEY, TASK_GROUP_KEY, "$")
+        let timekeeper_res: RedisResult<String> = redis
+            .xgroup_create_mkstream(TIMEKEEPER_STREAM_KEY, TASK_GROUP_KEY, "$")
             .await;
-        let results_res: RedisResult<String> = redis
-            .xgroup_create_mkstream(TASK_RESULTS_STREAM_KEY, TASK_GROUP_KEY, "$")
+        let statekeeper_res: RedisResult<String> = redis
+            .xgroup_create_mkstream(STATEKEEPER_STREAM_KEY, TASK_GROUP_KEY, "$")
             .await;
 
         // Check results, ignoring "BUSYGROUP" errors
-        for res in [task_run_res, scheduled_res, results_res] {
+        for res in [gatekeeper_res, timekeeper_res, statekeeper_res] {
             match res {
                 Ok(_) => {}
                 Err(e)
@@ -96,17 +97,20 @@ impl Actor for Processor {
     ) -> Result<Self, Self::Error> {
         debug!("Processor actor starting with ID: {}", args.id);
         let id = args.id;
-        let scheduler_conn = args.redis.clone();
-        let runner_conn = args.redis.clone();
+        let timekeeper_conn = args.redis.clone();
+        let gatekeeper_conn = args.redis.clone();
+        let statekeeper_conn = args.redis.clone();
         let worker_clone = args.worker.clone();
 
         // Spawn Scheduler
-        let timekeeper = TimeKeeper::new(id, scheduler_conn, actor_ref.clone()).await;
-        args.timekeeper = Some(TimeKeeper::spawn(timekeeper));
+        let timekeeper = TimeKeeper::new(id, timekeeper_conn, actor_ref.clone());
+        args.timekeeper = Some(timekeeper);
 
-        // Spawn TaskRunner
-        let gatekeeper = GateKeeper::new(id, runner_conn, worker_clone).await;
-        args.gatekeeper = Some(GateKeeper::spawn(gatekeeper));
+        let gatekeeper = GateKeeper::new(id, gatekeeper_conn, worker_clone);
+        args.gatekeeper = Some(gatekeeper);
+
+        let statekeeper = StateKeeper::new(id, statekeeper_conn, actor_ref.clone());
+        args.statekeeper = Some(statekeeper);
 
         Ok(args)
     }
@@ -120,7 +124,7 @@ impl Message<Script> for Processor {
         message: Script,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        info!("Processor received Script_______: {:?}", &message);
+        info!("Processor received Script: {:?}", &message);
         self.gatekeeper.as_ref().unwrap().tell(message).await;
         Ok(())
     }
@@ -148,6 +152,36 @@ impl Message<TransitionState> for Processor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         info!("Processor received TransitionState: {:?}", message);
+        self.statekeeper.as_ref().unwrap().tell(message).await;
+        OrcaReply { success: true }
+    }
+}
+
+impl Message<GetResult> for Processor {
+    type Reply = Result<String, SendError<GetResult, RedisError>>;
+
+    async fn handle(
+        &mut self,
+        message: GetResult,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let res = self.statekeeper.as_ref().unwrap().ask(message).await;
+        match res {
+            Ok(reply) => Ok(reply),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl Message<Register<ListenForResult>> for Processor {
+    type Reply = OrcaReply;
+
+    async fn handle(
+        &mut self,
+        message: Register<ListenForResult>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.statekeeper.as_ref().unwrap().tell( message).await;
         OrcaReply { success: true }
     }
 }
