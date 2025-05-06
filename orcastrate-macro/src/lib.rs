@@ -3,7 +3,6 @@ use proc_macro::TokenStream;
 use quote::{quote, format_ident};
 use syn::{parse_macro_input, ItemFn, FnArg, PatType, ReturnType};
 
-
 #[proc_macro_attribute]
 pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
@@ -82,50 +81,73 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #func_vis struct #task_struct_name {
             pub task_name: String,
             pub worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>,
+            pub task_id: ::uuid::Uuid,
+            pub handle: Option<::kameo::prelude::ActorRef<::orcastrate::task::RunHandle>>,
         }
 
         impl #task_struct_name {
              fn register(
                 worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>
              ) -> Self {
-                Self { task_name: #task_name_literal.to_string(), worker_ref }
+                // Initialize task_id to None
+                let id = ::uuid::Uuid::new_v4();
+                Self { task_name: #task_name_literal.to_string(), worker_ref, task_id: id, handle: None }
             }
             fn get_worker_id(&self) -> String {
                 self.worker_ref.id().to_string()
             }
     
-            pub async fn submit(&self, #( #task_arg_names: #task_arg_types ),* ) -> Result<&Self, ::orcastrate::worker::WorkerError>
+            pub async fn submit(&mut self, #( #task_arg_names: #task_arg_types ),* ) -> Result<&mut Self, ::orcastrate::worker::WorkerError>
             {
-                let args = #task_args_struct_name {
-                    #( #task_arg_names: #task_arg_names.clone() ),* // TODO: Require Clone bound on arg types?
+                let args_struct_instance = #task_args_struct_name {
+                    #( #task_arg_names: #task_arg_names.clone() ),*
                 };
-                // Use serde_json from main crate? Assume it's available.
-                let serialized_args = ::serde_json::to_string(&args)
-                    .map_err(|e| ::orcastrate::worker::WorkerError(format!("Args serialization failed: {}", e)))?;
-                let message = ::orcastrate::messages::SubmitTask {
-                    task_name: self.task_name.clone(),
-                    args: serialized_args,
-                };
+                
+                let serialized_args_result = ::serde_json::to_string(&args_struct_instance)
+                    .map_err(|e| ::orcastrate::worker::WorkerError(format!("Args serialization failed for task '{}': {}", self.task_name, e)));
 
-                let ask_result = self.worker_ref.ask(message).await; // Returns Result<Result<(), WorkerError>, AskError>
+                let submit_run_message; // Declare message variable in the outer scope
+
+                if let Ok(serialized_args_string) = serialized_args_result {
+                    submit_run_message = ::orcastrate::messages::SubmitRun {
+                        task_name: self.task_name.clone(),
+                        args: Some(serialized_args_string),
+                        task_id: self.task_id,
+                    };
+                } else {
+                    // Properly return the serialization error
+                    return Err(serialized_args_result.unwrap_err()); 
+                }
+                
+                let ask_result = self.worker_ref.ask(submit_run_message).await;
                 
                 match ask_result {
+                    Ok(worker_reply_handle) => {
+                        self.handle = Some(worker_reply_handle);
+                        Ok(self)
+                    }
+                    Err(kameo_err) => {
+                        Err(::orcastrate::worker::WorkerError(format!("Kameo ask error for task '{}': {}", self.task_name, kameo_err)))
+                    }
+                }
+            }
+            pub async fn result(&mut self,timeout: Option<Duration>) -> Result<&Self, ::orcastrate::worker::WorkerError> {
+                let message = ::orcastrate::messages::GetResult {
+                    task_id: self.task_id,
+                };
+                let handle = self.handle.as_ref().unwrap().ask(message).await;
+                match handle {
                     Ok(worker_reply) => {
                         // `worker_reply` is Result<(), WorkerError>
                         // Propagate the worker's result (Ok or Err)
                         Ok(self)
                     }
+
                     Err(kameo_err) => {
                         // Map the AskError to WorkerError
                         Err(::orcastrate::worker::WorkerError(format!("Kameo ask error: {}", kameo_err)))
                     }
                 }
-            }
-            pub async fn result(&self,timeout: Option<Duration>) -> Result<&Self, ::orcastrate::worker::WorkerError> {
-                todo!()
-            }
-            pub async fn status(&self) -> Result<&Self, ::orcastrate::worker::WorkerError> {
-                todo!()
             }
         }
     };
