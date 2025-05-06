@@ -1,10 +1,11 @@
-#![feature(trait_alias)]
+pub mod error;
 
 pub mod task;
 pub mod worker;
 pub mod processors;
 pub mod messages;
 pub mod notify;
+pub mod seer;
 #[cfg(test)]
 mod tests {
     use super::*;

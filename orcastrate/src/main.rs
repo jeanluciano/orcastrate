@@ -14,11 +14,6 @@ async fn my_async_task(url: String, count: i32) -> Result<String, String> {
     }
 }
 
-#[orca_task]
-async fn returns_int() -> Result<i32, String> {
-    tokio::time::sleep(Duration::from_secs(4)).await;
-    Ok(42)
-}
 
 #[tokio::main]
 async fn main() {
@@ -26,12 +21,12 @@ async fn main() {
         .run()
         .await;
     let mut async_task = my_async_task::register(worker.clone());
-    let mut int_task = returns_int::register(worker.clone());
 
     let task_handle = async_task.submit("https://example.com".to_string(), 10).await.unwrap();
 
-    let result = task_handle.result(None).await.expect("Getting result failed");
-
+    
+    let _result = task_handle.result(None).await.expect("Getting result failed");
+  
     println!("Main loop running. Tasks are executing asynchronously...");
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;

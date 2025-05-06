@@ -28,7 +28,7 @@ impl TimeKeeper {
     }
 
     // Placeholder for handling scheduled tasks
-    async fn handle_scheduled(&mut self, message: TransitionState) {
+    async fn _handle_scheduled(&mut self, message: TransitionState) {
         info!("TimeKeeper handling scheduled task: {:?}", message.task_id);
         // TODO: Implement scheduling logic (e.g., writing to TASK_SCHEDULED_STREAM_KEY)
     }
@@ -40,7 +40,7 @@ impl TimeKeeper {
             ("task_id", &script.id.to_string()),
             ("scheduled_at", &scheduled_at_str),
         ];
-        let res = self
+        let _ = self
             .redis
             .xadd::<&str, &str, &str, &str, String>(TIMEKEEPER_STREAM_KEY, "*", &key_values)
             .await;
@@ -98,7 +98,7 @@ impl TimeKeeper {
                                     .expect("args not a valid string");
                                 let now = tokio::time::Instant::now().elapsed().as_millis();
                                 if now >= schedeled_at {
-                                    let send_result = processor
+                                    let _send_result = processor
                                         .tell(Script {
                                             id: task_id,
                                             task_name: task_name_str,

@@ -8,8 +8,8 @@ use std::pin::Pin;
 use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
-use crate::notify::Register;
-use crate::processors::redis::Processor;
+use crate::error::OrcaError;
+
 pub type TaskFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 pub type SerializedTaskFuture = fn(String) -> Result<TaskFuture, OrcaError>;
 
@@ -18,8 +18,10 @@ pub struct StaticTaskDefinition {
     pub task_name: &'static str,
     pub task_future: SerializedTaskFuture,
 }
-
+// !!!!!!Do not put any other code in this file. This interacts with the orcastrate-macro.!!!!!!!!!
 inventory::collect!(StaticTaskDefinition);
+// !!!!!!Do not put any other code in this file. This interacts with the orcastrate-macro.!!!!!!!!
+// !!!!!!Do not put any other code in this file. This interacts with the orcastrate-macro.!!!!!!!!
 
 // TaskRun is the main actor that runs the task.
 pub struct TaskRun {
@@ -121,7 +123,7 @@ impl Actor for TaskRun {
         // This is the reason that the future is optional.
         if let Some(future) = args.future.take() {
             let handle = tokio::spawn(async move {
-                info!("Attempting to create future for task {}", task_id);
+                info!("Attempting to create future for task {} with retries: {}", task_id, args.max_retries);
                 match future(serialized_args.unwrap_or("".to_string())) {
                     Ok(task_future) => {
                         info!("Executing future for task {}", task_id);
@@ -223,18 +225,6 @@ impl Message<FutureResult> for TaskRun {
     }
 }
 
-
-#[derive(Debug)]
-pub struct OrcaError(pub String);
-
-impl std::fmt::Display for OrcaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for OrcaError {}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RunState {
     Running,
@@ -262,72 +252,6 @@ impl RunState {
             "Completed" => Some(RunState::Completed),
             "Failed" => Some(RunState::Failed),
             _ => None,
-        }
-    }
-}
-
-
-pub struct  RunHandle {
-    task_name: String,
-    task_id: Uuid,
-    processor_ref: ActorRef<Processor>,
-    args: Option<String>,
-}
-
-impl RunHandle {
-    pub fn new(processor_ref: ActorRef<Processor>, task_name: String, args: Option<String> ) -> ActorRef<RunHandle> {
-        let task_id = Uuid::new_v4();
-        RunHandle::spawn(Self { task_id, processor_ref, task_name, args })
-    }
-}
-
-impl Actor for RunHandle {
-    type Args = Self;
-    type Error = OrcaError;
-
-    async fn on_start(
-        mut args: Self::Args,
-        actor_ref: ActorRef<RunHandle>,
-    ) -> Result<Self, OrcaError> {
-        let recipient = actor_ref.clone();
-        let message = Register(recipient.recipient::<ListenForResult>());
-        let _ = args.processor_ref.tell(message).await;
-        Ok(args)
-    }
-    
-}
-#[derive(Debug)]
-pub struct ListenForResult {
-    task_id: Uuid,
-}
-
-impl Message<ListenForResult> for RunHandle {
-    type Reply = OrcaReply;
-
-    async fn handle(
-        &mut self,
-        message: ListenForResult,
-        _ctx: &mut Context<RunHandle, Self::Reply>,
-    ) -> Self::Reply {
-        info!("Received ListenForResult for task {}", message.task_id);
-        
-        OrcaReply { success: true }
-    }
-}
-
-impl Message<GetResult> for RunHandle {
-    type Reply = Result<String, OrcaError>; 
-
-    async fn handle(
-        &mut self,
-        message: GetResult,
-        _ctx: &mut Context<RunHandle, Self::Reply>,
-    ) -> Self::Reply {
-        let message = GetResult { task_id: self.task_id };
-        let result = self.processor_ref.ask(message).await;
-        match result {
-            Ok(result) => Ok(result),
-            Err(e) => Err(OrcaError(format!("Failed to get result for task {}: {}", self.task_id, e))),
         }
     }
 }

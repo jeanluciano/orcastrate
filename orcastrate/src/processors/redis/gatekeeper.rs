@@ -1,11 +1,9 @@
 use crate::messages::*;
-use crate::task::RunState;
 use crate::worker::Worker;
 use kameo::prelude::*;
 use redis::aio::MultiplexedConnection;
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, RedisError, RedisResult};
-use serde_json;
 use std::collections::HashMap;
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -117,7 +115,7 @@ impl GateKeeper {
         let key_values: &[(&str, String)] = &[
             ("task_name", message.task_name.clone()),
             ("id", message.id.to_string()),
-            ("args", message.args.clone().unwrap_or("".to_string())), // Store the serialized state data
+            ("args", message.args.clone().unwrap_or("{}".to_string())), // Store "{}" for None args
         ];
 
         // Use xadd with Vec<(&str, String)> because values are now owned Strings

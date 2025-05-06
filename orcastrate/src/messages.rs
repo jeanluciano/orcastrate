@@ -2,7 +2,7 @@ use kameo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::task::RunState;
-
+use tokio::time::Duration;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubmitRun {
     pub task_name: String,
@@ -25,6 +25,7 @@ pub struct RunTask {
 #[derive(Debug, Clone)]
 pub struct GetResult {
     pub task_id: Uuid,
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,3 +58,8 @@ pub struct TransitionState {
     pub result: Option<String>,
 }
 
+
+#[derive(Debug, Clone)]
+pub struct ListenForResult {
+    pub task_id: Uuid,
+}

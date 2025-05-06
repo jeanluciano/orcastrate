@@ -1,7 +1,7 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
-use quote::{quote, format_ident};
-use syn::{parse_macro_input, ItemFn, FnArg, PatType, ReturnType};
+use quote::{format_ident, quote};
+use syn::{FnArg, ItemFn, ReturnType, parse_macro_input};
 
 #[proc_macro_attribute]
 pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -14,11 +14,6 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let func_name = &func.sig.ident;
     let func_vis = &func.vis;
-    // let func_asyncness = &func.sig.asyncness; // Original function is async
-    // REMOVED: Generics handling
-    // let func_generics = &func.sig.generics;
-    // let (impl_generics, ty_generics, where_clause) = func_generics.split_for_impl();
-
 
     let return_type = &func.sig.output;
     let (ok_type, err_type) = match return_type {
@@ -50,12 +45,16 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ReturnType::Default => panic!("Task function must return a Result"),
     };
 
-
     // --- Argument Parsing ---
-    let task_args: Vec<_> = func.sig.inputs.iter().map(|arg| match arg {
-        FnArg::Typed(pat_type) => pat_type.clone(),
-        _ => panic!("Unsupported argument type (e.g., self) in task function"),
-    }).collect();
+    let task_args: Vec<_> = func
+        .sig
+        .inputs
+        .iter()
+        .map(|arg| match arg {
+            FnArg::Typed(pat_type) => pat_type.clone(),
+            _ => panic!("Unsupported argument type (e.g., self) in task function"),
+        })
+        .collect();
 
     let task_arg_names: Vec<_> = task_args.iter().map(|pt| &pt.pat).collect();
     let task_arg_types: Vec<_> = task_args.iter().map(|pt| &pt.ty).collect();
@@ -66,7 +65,6 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let future_creator_fn_name = format_ident!("create_{}_future", func_name);
     let task_name_literal = func_name.to_string();
 
-
     // 1. Argument Struct (for serialization)
     let args_struct_def = quote! {
         #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
@@ -75,68 +73,68 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-
     let handle_struct_def = quote! {
-        #[derive(Debug)]
-        #func_vis struct #task_struct_name {
-            pub task_name: String,
-            pub worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>,
-            pub task_id: ::uuid::Uuid,
-            pub handle: Option<::kameo::prelude::ActorRef<::orcastrate::task::RunHandle>>,
-        }
-
-        impl #task_struct_name {
-             fn register(
-                worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>
-             ) -> Self {
-                // Initialize task_id to None
-                let id = ::uuid::Uuid::new_v4();
-                Self { task_name: #task_name_literal.to_string(), worker_ref, task_id: id, handle: None }
+            #[derive(Debug)]
+            #func_vis struct #task_struct_name {
+                pub task_name: String,
+                pub worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>,
+                pub task_id: ::uuid::Uuid,
+                pub seer_ref: Option<::kameo::prelude::ActorRef<::orcastrate::seer::Seer>>,
             }
-            fn get_worker_id(&self) -> String {
-                self.worker_ref.id().to_string()
-            }
-    
-            pub async fn submit(&mut self, #( #task_arg_names: #task_arg_types ),* ) -> Result<&mut Self, ::orcastrate::worker::WorkerError>
-            {
-                let args_struct_instance = #task_args_struct_name {
-                    #( #task_arg_names: #task_arg_names.clone() ),*
-                };
-                
-                let serialized_args_result = ::serde_json::to_string(&args_struct_instance)
-                    .map_err(|e| ::orcastrate::worker::WorkerError(format!("Args serialization failed for task '{}': {}", self.task_name, e)));
 
-                let submit_run_message; // Declare message variable in the outer scope
+            impl #task_struct_name {
+                 fn register(
+                    worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>
+                 ) -> Self {
+                    // Initialize task_id to None
+                    let id = ::uuid::Uuid::new_v4();
+                    Self { task_name: #task_name_literal.to_string(), worker_ref, task_id: id, seer_ref: None}
+                }
+                fn get_worker_id(&self) -> String {
+                    self.worker_ref.id().to_string()
+                }
 
-                if let Ok(serialized_args_string) = serialized_args_result {
-                    submit_run_message = ::orcastrate::messages::SubmitRun {
-                        task_name: self.task_name.clone(),
-                        args: Some(serialized_args_string),
-                        task_id: self.task_id,
+                pub async fn submit(&mut self, #( #task_arg_names: #task_arg_types ),* ) -> Result<&mut Self, ::orcastrate::error::OrcaError>
+                {
+                    let args_struct_instance = #task_args_struct_name {
+                        #( #task_arg_names: #task_arg_names.clone() ),*
                     };
-                } else {
-                    // Properly return the serialization error
-                    return Err(serialized_args_result.unwrap_err()); 
-                }
-                
-                let ask_result = self.worker_ref.ask(submit_run_message).await;
-                
-                match ask_result {
-                    Ok(worker_reply_handle) => {
-                        self.handle = Some(worker_reply_handle);
-                        Ok(self)
+
+                    let serialized_args_result = ::serde_json::to_string(&args_struct_instance)
+                        .map_err(|e| ::orcastrate::error::OrcaError(format!("Args serialization failed for task '{}': {}", self.task_name, e)));
+
+                    let submit_run_message; // Declare message variable in the outer scope
+
+                    if let Ok(serialized_args_string) = serialized_args_result {
+                        submit_run_message = ::orcastrate::messages::SubmitRun {
+                            task_name: self.task_name.clone(),
+                            args: Some(serialized_args_string),
+                            task_id: self.task_id,
+                        };
+                    } else {
+                        // Properly return the serialization error
+                        return Err(serialized_args_result.unwrap_err());
                     }
-                    Err(kameo_err) => {
-                        Err(::orcastrate::worker::WorkerError(format!("Kameo ask error for task '{}': {}", self.task_name, kameo_err)))
+
+                    let ask_result = self.worker_ref.ask(submit_run_message).await;
+
+                    match ask_result {
+                        Ok(worker_reply_handle) => {
+                            self.seer_ref = Some(worker_reply_handle);
+                            Ok(self)
+                        }
+                        Err(kameo_err) => {
+                            Err(::orcastrate::error::OrcaError(format!("Kameo ask error for task '{}': {}", self.task_name, kameo_err)))
+                        }
                     }
                 }
-            }
-            pub async fn result(&mut self,timeout: Option<Duration>) -> Result<&Self, ::orcastrate::worker::WorkerError> {
-                let message = ::orcastrate::messages::GetResult {
+                pub async fn result(&mut self,timeout: Option<::tokio::time::Duration>) -> Result<&Self, ::orcastrate::error::OrcaError> {
+                    let message = ::orcastrate::messages::GetResult {
                     task_id: self.task_id,
-                };
-                let handle = self.handle.as_ref().unwrap().ask(message).await;
-                match handle {
+                    timeout: timeout,
+                    };
+                    let handle = self.seer_ref.as_ref().unwrap().ask(message).await;
+                    match handle {
                     Ok(worker_reply) => {
                         // `worker_reply` is Result<(), WorkerError>
                         // Propagate the worker's result (Ok or Err)
@@ -145,13 +143,13 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
                     Err(kameo_err) => {
                         // Map the AskError to WorkerError
-                        Err(::orcastrate::worker::WorkerError(format!("Kameo ask error: {}", kameo_err)))
-                    }
-                }
+                        Err(::orcastrate::error::OrcaError(format!("Kameo ask error: {}", kameo_err)))
             }
         }
-    };
+    }
 
+            }
+        };
 
     // 3. The Original Function Definition (remains unchanged)
     let original_func_def = &func;
@@ -159,10 +157,10 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // 4. Task Future Creator Function (non-generic signature)
     let future_creator_fn = quote! {
          fn #future_creator_fn_name (serialized_args: String)
-             -> Result<::orcastrate::task::TaskFuture, ::orcastrate::task::OrcaError>
+             -> Result<::orcastrate::task::TaskFuture, ::orcastrate::error::OrcaError>
          {
              let args: #task_args_struct_name = ::serde_json::from_str(&serialized_args)
-                 .map_err(|e| ::orcastrate::task::OrcaError(format!("Args deserialization failed for '{}': {}", #task_name_literal, e)))?;
+                 .map_err(|e| ::orcastrate::error::OrcaError(format!("Args deserialization failed for '{}': {}", #task_name_literal, e)))?;
 
              // Create the future that calls the original function
              let task_future = Box::pin(async move {
@@ -171,8 +169,8 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                  // Serialize the result or error to String
                  match result {
                     Ok(ok_val) => ::serde_json::to_string(&ok_val)
-                        .map_err(|e| ::orcastrate::task::OrcaError(format!("Result serialization failed: {}", e))),
-                    Err(err_val) => Err(::orcastrate::task::OrcaError(
+                        .map_err(|e| ::orcastrate::error::OrcaError(format!("Result serialization failed: {}", e))),
+                    Err(err_val) => Err(::orcastrate::error::OrcaError(
                         ::serde_json::to_string(&err_val)
                             .unwrap_or_else(|e| format!("Error serialization failed: {}", e))
                     )),
@@ -199,8 +197,6 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     };
-
-
 
     let expanded = quote! {
         #args_struct_def

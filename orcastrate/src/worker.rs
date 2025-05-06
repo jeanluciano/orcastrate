@@ -2,17 +2,16 @@ use crate::messages::{
     GetResult, ScheduleTask, ScheduledScript, Script, SubmitRun, TransitionState,
 };
 use crate::processors::redis::Processor;
-use crate::task::{RunHandle, RunState, StaticTaskDefinition, TaskRun};
+use crate::task::{StaticTaskDefinition, TaskRun};
 use inventory;
 use kameo::Actor;
-use kameo::prelude::SendError;
 use kameo::prelude::{ActorRef, Context, Message};
-use redis::RedisError;
 use std::collections::HashMap;
-use thiserror::Error;
 use tracing::info;
 use tracing_subscriber;
 use uuid::Uuid;
+use crate::error::OrcaError;
+use crate::seer::Seer;
 pub struct Worker {
     id: Uuid,
     url: String,
@@ -51,12 +50,12 @@ impl Worker {
 
 impl Actor for Worker {
     type Args = Self;
-    type Error = WorkerError;
+    type Error = OrcaError;
 
     async fn on_start(
         mut args: Self::Args,
         actor_ref: ActorRef<Self>,
-    ) -> Result<Self, WorkerError> {
+    ) -> Result<Self, OrcaError> {
         let processor = Processor::spawn(Processor::new(args.id, &args.url, actor_ref).await);
         args.processor = Some(processor);
         Ok(args)
@@ -66,7 +65,7 @@ impl Actor for Worker {
 // Message handlers
 
 impl Message<ScheduleTask> for Worker {
-    type Reply = Result<(), WorkerError>;
+    type Reply = Result<(), OrcaError>;
 
     async fn handle(
         &mut self,
@@ -76,29 +75,31 @@ impl Message<ScheduleTask> for Worker {
         let task_id = Uuid::new_v4();
         let task_name = message.task_name.clone();
         let scheduled_at = message.scheduled_at;
-        let task = self.registered_tasks.get_mut(&task_name).unwrap();
-        let res = self.processor.as_ref().unwrap().ask(ScheduledScript {
-            id: task_id,
-            task_name: task_name,
-            args: None,
-            scheduled_at: scheduled_at,
-        });
-        Ok(())
+        if let Some(_orca) = self.registered_tasks.get(&task_name) {
+            let _ = self.processor.as_ref().unwrap().ask(ScheduledScript {
+                id: task_id,
+                task_name: task_name,
+                args: None,
+                scheduled_at: scheduled_at,
+            });
+            Ok(())
+        } else {
+            Err(OrcaError(format!("Task {} not registered", task_name)))
+        }
     }
 }
 
 impl Message<SubmitRun> for Worker {
-    type Reply = Result<ActorRef<RunHandle>, WorkerError>;
+    type Reply = Result<ActorRef<Seer>, OrcaError>;
     async fn handle(
         &mut self,
         message: SubmitRun,
-        ctx: &mut Context<Self, Self::Reply>,
+        _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let task_id = Uuid::new_v4();
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
             info!("Submitting task: {}:{}", message.task_name, task_id);
-            let task_name = message.task_name.clone();
-            let args = message.args.clone();
+
             let _ = self
                 .processor
                 .as_ref()
@@ -110,10 +111,10 @@ impl Message<SubmitRun> for Worker {
                 })
                 .await;
             let run_handle =
-                RunHandle::new(self.processor.as_ref().unwrap().clone(), task_name, args);
+                Seer::new(self.processor.as_ref().unwrap().clone());
             Ok(run_handle)
         } else {
-            Err(WorkerError(format!(
+            Err(OrcaError(format!(
                 "Task {} not registered",
                 message.task_name
             )))
@@ -122,7 +123,7 @@ impl Message<SubmitRun> for Worker {
 }
 
 impl Message<TransitionState> for Worker {
-    type Reply = Result<(), WorkerError>;
+    type Reply = Result<(), OrcaError>;
 
     async fn handle(
         &mut self,
@@ -131,17 +132,17 @@ impl Message<TransitionState> for Worker {
     ) -> Self::Reply {
         let res = self.processor.as_ref().unwrap().ask(message).await;
         match res {
-            Ok(reply) => Ok(()),
+            Ok(_) => Ok(()),
             Err(e) => {
                 eprintln!("Error handling transition state: {}", e);
-                Err(WorkerError(e.to_string()))
+                Err(OrcaError(e.to_string()))
             }
         }
     }
 }
 
 impl Message<Script> for Worker {
-    type Reply = Result<(), WorkerError>;
+    type Reply = Result<(), OrcaError>;
 
     async fn handle(
         &mut self,
@@ -164,7 +165,7 @@ impl Message<Script> for Worker {
             self.task_runs.insert(id, orca);
             Ok(())
         } else {
-            Err(WorkerError(format!(
+            Err(OrcaError(format!(
                 "Task {} not registered",
                 message.task_name
             )))
@@ -173,7 +174,7 @@ impl Message<Script> for Worker {
 }
 
 impl Message<GetResult> for Worker {
-    type Reply = Result<String, WorkerError>;
+    type Reply = Result<String, OrcaError>;
 
     async fn handle(
         &mut self,
@@ -181,44 +182,13 @@ impl Message<GetResult> for Worker {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let res = self.processor.as_ref().unwrap().ask(message).await;
-
-        match res {
+        let result_string = match res {
             Ok(result_string) => {
                 info!("Result: {}", &result_string);
                 Ok(result_string)
             }
-            Err(send_error) => Err(WorkerError::from(send_error)),
-        }
-    }
-}
-
-#[derive(Error, Debug, Clone)]
-pub struct WorkerError(pub String);
-
-impl std::fmt::Display for WorkerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<String> for WorkerError {
-    fn from(s: String) -> Self {
-        WorkerError(s)
-    }
-}
-
-impl From<RedisError> for WorkerError {
-    fn from(err: RedisError) -> Self {
-        WorkerError(format!("Redis error: {}", err))
-    }
-}
-
-impl<M, E> From<SendError<M, E>> for WorkerError
-where
-    M: std::fmt::Debug,
-    E: std::fmt::Debug,
-{
-    fn from(err: SendError<M, E>) -> Self {
-        WorkerError(format!("Send error: {:?}", err))
+            Err(send_error) => Err(OrcaError(send_error.to_string())),
+        };
+        result_string
     }
 }

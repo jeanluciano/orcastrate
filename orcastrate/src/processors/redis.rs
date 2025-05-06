@@ -8,7 +8,8 @@ use tracing::debug;
 use tracing::info;
 use uuid::Uuid;
 use crate::notify::Register;
-use crate::task::ListenForResult;
+// use crate::task::ListenForResult;
+use crate::error::OrcaError;
 // Declare modules
 mod gatekeeper;
 mod statekeeper;
@@ -90,7 +91,7 @@ impl Processor {
 
 impl Actor for Processor {
     type Args = Self;
-    type Error = RedisError;
+    type Error = OrcaError;
     async fn on_start(
         mut args: Self::Args,
         actor_ref: ActorRef<Self>,
@@ -109,7 +110,7 @@ impl Actor for Processor {
         let gatekeeper = GateKeeper::new(id, gatekeeper_conn, worker_clone);
         args.gatekeeper = Some(gatekeeper);
 
-        let statekeeper = StateKeeper::new(id, statekeeper_conn, actor_ref.clone());
+        let statekeeper = StateKeeper::new(id, statekeeper_conn);
         args.statekeeper = Some(statekeeper);
 
         Ok(args)
@@ -117,7 +118,7 @@ impl Actor for Processor {
 }
 
 impl Message<Script> for Processor {
-    type Reply = Result<(), RedisError>;
+    type Reply = Result<(), OrcaError>;
 
     async fn handle(
         &mut self,
@@ -125,7 +126,7 @@ impl Message<Script> for Processor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         info!("Processor received Script: {:?}", &message);
-        self.gatekeeper.as_ref().unwrap().tell(message).await;
+        let _ = self.gatekeeper.as_ref().unwrap().tell(message).await;
         Ok(())
     }
 }
@@ -138,7 +139,7 @@ impl Message<ScheduledScript> for Processor {
         message: ScheduledScript,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.timekeeper.as_ref().unwrap().tell(message).await;
+        let _ = self.timekeeper.as_ref().unwrap().tell(message).await;
         OrcaReply { success: true }
     }
 }
@@ -152,13 +153,13 @@ impl Message<TransitionState> for Processor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         info!("Processor received TransitionState: {:?}", message);
-        self.statekeeper.as_ref().unwrap().tell(message).await;
+        let _ = self.statekeeper.as_ref().unwrap().tell(message).await;
         OrcaReply { success: true }
     }
 }
 
 impl Message<GetResult> for Processor {
-    type Reply = Result<String, SendError<GetResult, RedisError>>;
+    type Reply = Result<String, OrcaError>;
 
     async fn handle(
         &mut self,
@@ -168,7 +169,7 @@ impl Message<GetResult> for Processor {
         let res = self.statekeeper.as_ref().unwrap().ask(message).await;
         match res {
             Ok(reply) => Ok(reply),
-            Err(e) => Err(e),
+            Err(e) => Err(OrcaError(e.to_string())),
         }
     }
 }
@@ -181,7 +182,7 @@ impl Message<Register<ListenForResult>> for Processor {
         message: Register<ListenForResult>,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.statekeeper.as_ref().unwrap().tell( message).await;
+        let _ = self.statekeeper.as_ref().unwrap().tell( message).await;
         OrcaReply { success: true }
     }
 }
