@@ -20,7 +20,7 @@ async fn main() {
     let worker = Worker::new("redis://localhost:6379".to_string())
         .run()
         .await;
-    let mut async_task = my_async_task::register(worker.clone());
+    let async_task = my_async_task::register(worker.clone());
 
     let task_handle = async_task
     .submit("https://example.com".to_string(), 10)
@@ -29,7 +29,8 @@ async fn main() {
 
     match task_handle {
         Ok(task_handle) => {
-            let _result = task_handle.result(Some(5)).await.expect("Getting result failed");
+            let result = task_handle.result(5).await.expect("Getting result failed");
+            println!("Result: {}", result);
         }
         Err(e) => {
             println!("Error starting task: {}", e);

@@ -1,9 +1,9 @@
 use crate::error::OrcaError;
 use crate::messages::{
-    GetResult, GetResultById, ScheduleTask, ScheduledScript, Script, StartRun, SubmitRun, TransitionState,
+    GetResultById, ScheduleTask, ScheduledScript, Script, StartRun, SubmitRun, TransitionState,
 };
 use crate::processors::redis::Processor;
-use crate::seer::{Handler, Seer};
+use crate::seer::Handler;
 use crate::task::{StaticTaskDefinition, TaskRun};
 use inventory;
 use kameo::Actor;
@@ -108,7 +108,7 @@ impl Message<StartRun> for Worker {
                 })
                 .await;
             match processor_res {
-                Ok(processor_res) => {
+                Ok(_processor_res) => {
                     let run_handle =
                         Handler::new(self.processor.as_ref().unwrap().clone(), task_id);
                     Ok(run_handle)

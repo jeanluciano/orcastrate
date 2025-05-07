@@ -8,7 +8,6 @@ pub mod notify;
 pub mod seer;
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn it_works() {

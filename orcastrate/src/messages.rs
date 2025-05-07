@@ -2,7 +2,6 @@ use kameo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::task::RunState;
-use tokio::time::Duration;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubmitRun {
     pub task_name: String,

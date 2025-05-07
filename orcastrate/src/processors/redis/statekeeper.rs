@@ -8,7 +8,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 use crate::notify::{DeliveryStrategy, Register};
 use crate::notify::MessageBus;
-use super::{ STATEKEEPER_STREAM_KEY};
+use super::STATEKEEPER_STREAM_KEY;
 use crate::error::OrcaError;
 // StateKeeper is responsible for storing the state of the task in Redis and deleting task state when the
 // time to live expires.keeps track of task and index of task in redis stream.

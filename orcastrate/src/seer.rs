@@ -1,5 +1,5 @@
 use crate::error::OrcaError;
-use crate::messages::{GetResult, HandleResult, ListenForResult, OrcaReply, GetResultById};
+use crate::messages::{HandleResult, ListenForResult, OrcaReply, GetResultById};
 use crate::notify::Register;
 use crate::processors::redis::Processor;
 use kameo::prelude::*;
@@ -141,9 +141,9 @@ impl Handler {
     pub fn new(actor_ref: ActorRef<Processor>, task_id: Uuid) -> Self {
         Self { seer_ref: Seer::new(actor_ref, task_id) }
     }
-    pub async fn result(&self, timeout: Option<i64>) -> Result<String, OrcaError> {
-        
-        let result = self.seer_ref.ask(HandleResult { timeout:timeout }).await;
+    pub async fn result(&self, timeout: impl Into<Option<i64>>) -> Result<String, OrcaError> {
+        let timeout_option: Option<i64> = timeout.into();
+        let result = self.seer_ref.ask(HandleResult { timeout: timeout_option }).await;
         match result {
             Ok(result) => Ok(result),
             Err(e) => Err(OrcaError(format!("Error getting result: {}", e))),
