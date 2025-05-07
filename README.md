@@ -42,8 +42,7 @@ Orcastra is a Proof-of-Concept (PoC) job queue designed for processing tasks eff
 
 ### Phase 2: Advanced Features
 - ⏳ **TimeKeeper:** Defer or schedule tasks for future execution, acts as single/distributed event loop
-- ⏳ **Error Handling:** Implement comprehensive retry mechanisms and dead-letter queues
-- ⏳ **StateKeeper:** Processor for storing and managing run states
+- ⏳ **StateKeeper:** Processor for storing and managing run states(experimental)
 - ⏳ **CI/CD:** Implementing sound testing and CI/CD for easier contribution
 
 ### Phase 3: Integration & Scaling
@@ -54,22 +53,16 @@ Orcastra is a Proof-of-Concept (PoC) job queue designed for processing tasks eff
 ## Getting Started
 
 ### Prerequisites
-This project requires Rust **nightly** and a running **Redis** instance.
+This a running **Redis** instance.
 
-1.  **Install/Switch to Nightly Toolchain:**
-    If you don't have it, install `rustup` first. Then, in the project directory, run:
-    ```bash
-    rustup override set nightly
-    ```
-
-2.  **Start Redis:**
+1.  **Start Redis:**
     The simplest way is using Docker:
     ```bash
     docker run -d --name orcastra-redis -p 6379:6379 redis
     ```
     Ensure Redis is running on the default port (`6379`) at `localhost`.
 
-3.  **Run the Project:**
+2.  **Run the Project:**
     Execute the main example using Cargo:
     ```bash
     cargo run
@@ -105,9 +98,28 @@ let worker = Worker::new("redis://localhost:6379".to_string())
 let async_task = my_async_task::register(worker.clone());
 
 // Submit your task for execution
-let result = async_task
+let task_handle = async_task
+    .submit("https://example.com".to_string(), 10)
+    .start(None)
+    .await;
+
+// This and above are equivalent
+let task_handle = async_task
     .submit("https://example.com".to_string(), 10)
     .await;
+
+
+
+match task_handle {
+    Ok(task_handle) => {
+        // time out seconds.
+        let result = task_handle.result(5).await.expect("Getting result timeout");
+        println!("Result: {}", result);
+        }
+    Err(e) => {
+            println!("Error starting task: {}", e);
+        }
+    }
 ```
 
 For more examples and advanced usage, check the documentation.
