@@ -97,23 +97,44 @@ impl Message<StartRun> for Worker {
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
             info!("Submitting task: {}:{}", message.task_name, task_id);
 
-            let processor_res = self
-                .processor
-                .as_ref()
-                .unwrap()
-                .ask(Script {
-                    id: task_id,
-                    task_name: message.task_name,
-                    args: message.args,
-                })
-                .await;
-            match processor_res {
-                Ok(_processor_res) => {
+            let processor_result_for_match: Result<(), OrcaError>;
+
+            if let Some(delay) = message.delay {
+                let delay_ms = delay * 1000;
+                processor_result_for_match = self
+                    .processor
+                    .as_ref()
+                    .unwrap()
+                    .tell(ScheduledScript {
+                        id: task_id,
+                        task_name: message.task_name.clone(),
+                        args: message.args.clone(),
+                        scheduled_at: delay_ms,
+                    })
+                    .await
+                    .map_err(|e| OrcaError(format!("Error sending scheduled task: {}", e)));
+            } else {
+                processor_result_for_match = self
+                    .processor
+                    .as_ref()
+                    .unwrap()
+                    .ask(Script {
+                        id: task_id,
+                        task_name: message.task_name,
+                        args: message.args,
+                    })
+                    .await
+                    .map(|_| ()) 
+                    .map_err(|e| OrcaError(format!("Error sending task: {}", e)));
+            }
+
+            match processor_result_for_match {
+                Ok(()) => {
                     let run_handle =
                         Handler::new(self.processor.as_ref().unwrap().clone(), task_id);
                     Ok(run_handle)
                 }
-                Err(e) => Err(OrcaError(format!("Error submitting task: {}", e))),
+                Err(e) => Err(e), // e is already OrcaError
             }
         } else {
             Err(OrcaError(format!(

@@ -1,15 +1,15 @@
+use super::STATEKEEPER_STREAM_KEY;
+use crate::error::OrcaError;
 use crate::messages::*;
+use crate::notify::MessageBus;
+use crate::notify::{DeliveryStrategy, Register};
 use crate::task::RunState;
 use kameo::prelude::*;
-use redis::aio::MultiplexedConnection;
 use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
 use std::collections::HashMap;
 use tracing::{error, info};
 use uuid::Uuid;
-use crate::notify::{DeliveryStrategy, Register};
-use crate::notify::MessageBus;
-use super::STATEKEEPER_STREAM_KEY;
-use crate::error::OrcaError;
 // StateKeeper is responsible for storing the state of the task in Redis and deleting task state when the
 // time to live expires.keeps track of task and index of task in redis stream.
 pub struct StateKeeper {
@@ -20,10 +20,7 @@ pub struct StateKeeper {
 }
 
 impl StateKeeper {
-    pub fn new(
-        id: Uuid,
-        redis: MultiplexedConnection,
-    ) -> ActorRef<Self> {
+    pub fn new(id: Uuid, redis: MultiplexedConnection) -> ActorRef<Self> {
         let message_bus = MessageBus::spawn(MessageBus::new(DeliveryStrategy::Guaranteed));
         StateKeeper::spawn(Self {
             id,
@@ -32,10 +29,7 @@ impl StateKeeper {
             message_bus,
         })
     }
-
     async fn keep_state(&mut self, state: TransitionState) {
-        
-
         let task_id = state.task_id;
         let task_name = state.task_name;
         let new_state = state.new_state;
@@ -74,7 +68,7 @@ impl StateKeeper {
     async fn keep_result_hash(&mut self, task_id: Uuid, result: String) {
         let task_id_str = task_id.to_string();
         let res: redis::RedisResult<i64> = self.redis.hset(&task_id_str, "result", &result).await;
-        
+
         match res {
             Ok(_) => {
                 // let _ = self.message_bus.tell(Publish(ListenForResult { task_id: task_id })).await;
@@ -88,6 +82,7 @@ impl StateKeeper {
     }
 }
 
+
 impl Message<TransitionState> for StateKeeper {
     type Reply = OrcaReply;
 
@@ -100,13 +95,18 @@ impl Message<TransitionState> for StateKeeper {
 
         match message.new_state {
             RunState::Running => self.keep_state(message).await,
-            RunState::Completed => self.keep_result_hash(message.task_id, message.result.unwrap()).await,
-            RunState::Failed => info!("StateKeeper received Failed state for task {}", message.task_id),
+            RunState::Completed => {
+                self.keep_result_hash(message.task_id, message.result.unwrap())
+                    .await
+            }
+            RunState::Failed => info!(
+                "StateKeeper received Failed state for task {}",
+                message.task_id
+            ),
         }
         OrcaReply { success: true }
     }
 }
-
 impl Message<GetResultById> for StateKeeper {
     type Reply = Result<String, OrcaError>;
 
@@ -116,7 +116,8 @@ impl Message<GetResultById> for StateKeeper {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let task_id = message.task_id;
-        let res: redis::RedisResult<Option<String>> = self.redis.hget(&task_id.to_string(), "result").await;
+        let res: redis::RedisResult<Option<String>> =
+            self.redis.hget(&task_id.to_string(), "result").await;
         info!("StateKeeper received GetResultById: {:?}", &res);
 
         match res {
@@ -125,7 +126,6 @@ impl Message<GetResultById> for StateKeeper {
         }
     }
 }
-
 impl Message<Register<ListenForResult>> for StateKeeper {
     type Reply = OrcaReply;
 
@@ -139,7 +139,6 @@ impl Message<Register<ListenForResult>> for StateKeeper {
         OrcaReply { success: true }
     }
 }
-
 
 impl Actor for StateKeeper {
     type Args = Self;
