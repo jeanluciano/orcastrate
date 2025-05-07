@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use tracing::info;
 use tracing_subscriber;
 use uuid::Uuid;
+use chrono::Utc;
 pub struct Worker {
     id: Uuid,
     url: String,
@@ -60,32 +61,6 @@ impl Actor for Worker {
 }
 
 // Message handlers
-
-impl Message<ScheduleTask> for Worker {
-    type Reply = Result<(), OrcaError>;
-
-    async fn handle(
-        &mut self,
-        message: ScheduleTask,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let task_id = Uuid::new_v4();
-        let task_name = message.task_name.clone();
-        let scheduled_at = message.scheduled_at;
-        if let Some(_orca) = self.registered_tasks.get(&task_name) {
-            let _ = self.processor.as_ref().unwrap().ask(ScheduledScript {
-                id: task_id,
-                task_name: task_name,
-                args: None,
-                scheduled_at: scheduled_at,
-            });
-            Ok(())
-        } else {
-            Err(OrcaError(format!("Task {} not registered", task_name)))
-        }
-    }
-}
-
 impl Message<StartRun> for Worker {
     type Reply = Result<Handler, OrcaError>;
     async fn handle(
@@ -98,9 +73,10 @@ impl Message<StartRun> for Worker {
             info!("Submitting task: {}:{}", message.task_name, task_id);
 
             let processor_result_for_match: Result<(), OrcaError>;
+            let now = Utc::now().timestamp_millis();
 
             if let Some(delay) = message.delay {
-                let delay_ms = delay * 1000;
+                let submit_at_ms = now + delay * 1000;
                 processor_result_for_match = self
                     .processor
                     .as_ref()
@@ -109,7 +85,7 @@ impl Message<StartRun> for Worker {
                         id: task_id,
                         task_name: message.task_name.clone(),
                         args: message.args.clone(),
-                        scheduled_at: delay_ms,
+                        submit_at: submit_at_ms,
                     })
                     .await
                     .map_err(|e| OrcaError(format!("Error sending scheduled task: {}", e)));
@@ -136,38 +112,6 @@ impl Message<StartRun> for Worker {
                 }
                 Err(e) => Err(e), // e is already OrcaError
             }
-        } else {
-            Err(OrcaError(format!(
-                "Task {} not registered",
-                message.task_name
-            )))
-        }
-    }
-}
-
-impl Message<SubmitRun> for Worker {
-    type Reply = Result<Handler, OrcaError>;
-    async fn handle(
-        &mut self,
-        message: SubmitRun,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let task_id = Uuid::new_v4();
-        if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
-            info!("Submitting task: {}:{}", message.task_name, task_id);
-
-            let _ = self
-                .processor
-                .as_ref()
-                .unwrap()
-                .ask(Script {
-                    id: task_id,
-                    task_name: message.task_name,
-                    args: message.args,
-                })
-                .await;
-            let run_handle = Handler::new(self.processor.as_ref().unwrap().clone(), task_id);
-            Ok(run_handle)
         } else {
             Err(OrcaError(format!(
                 "Task {} not registered",

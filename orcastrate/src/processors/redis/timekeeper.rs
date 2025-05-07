@@ -7,7 +7,7 @@ use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, RedisError};
 use tracing::{debug, info};
 use uuid::Uuid;
-
+use chrono::prelude::*;
 pub struct TimeKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
@@ -33,17 +33,17 @@ impl TimeKeeper {
         // TODO: Implement scheduling logic (e.g., writing to TASK_SCHEDULED_STREAM_KEY)
     }
 
-    pub async fn schedule_task(&mut self, script: ScheduledScript) {
-        let scheduled_at_str = script.scheduled_at.to_string();
+    pub async fn schedule_task(mut redis: MultiplexedConnection, script: ScheduledScript) -> Result<(), RedisError> {
         let key_values: &[(&str, &str)] = &[
             ("task_name", &script.task_name),
             ("task_id", &script.id.to_string()),
-            ("scheduled_at", &scheduled_at_str),
+            ("submit_at", &script.submit_at.to_string()),
+            ("args", &script.args.unwrap_or("".to_string())),
         ];
-        let _ = self
-            .redis
+        redis
             .xadd::<&str, &str, &str, &str, String>(TIMEKEEPER_STREAM_KEY, "*", &key_values)
-            .await;
+            .await?;
+        Ok(())
     }
 
     pub async fn process_scheduled_stream(
@@ -55,7 +55,7 @@ impl TimeKeeper {
             .group(TASK_GROUP_KEY, &id.to_string())
             .count(10)
             .block(500);
-
+        
         loop {
             let messages_result: Result<StreamReadReply, RedisError> = redis
                 .xread_options(&[&TIMEKEEPER_STREAM_KEY], &[">"], &opts)
@@ -65,14 +65,15 @@ impl TimeKeeper {
                     if !messages.keys.is_empty() {
                         let stream = &messages.keys[0];
                         if !stream.ids.is_empty() {
-                            for message in &stream.ids {
-                                let task_name_val = message
+                            for message_entry in &stream.ids {
+                                let message_id = &message_entry.id;
+                                let task_name_val = message_entry
                                     .map
                                     .get("task_name")
                                     .expect("Missing task_name in stream message");
                                 let task_name_str: String = redis::from_redis_value(task_name_val)
                                     .expect("task_name not a valid string");
-                                let task_id_val = message
+                                let task_id_val = message_entry
                                     .map
                                     .get("task_id")
                                     .expect("Missing task_id in stream message");
@@ -80,31 +81,57 @@ impl TimeKeeper {
                                     .expect("task_id not a valid string");
                                 let task_id = Uuid::parse_str(&task_id_str)
                                     .expect("task_id not a valid UUID");
-                                let scheduled_at_val = message
+                                let submit_at_val = message_entry
                                     .map
-                                    .get("scheduled_at")
-                                    .expect("Missing scheduled_at in stream message");
-                                let scheduled_at_str: String =
-                                    redis::from_redis_value(scheduled_at_val)
-                                        .expect("scheduled_at not a valid string");
-                                let schedeled_at = scheduled_at_str
-                                    .parse::<u128>()
-                                    .expect("scheduled_at not a valid u128");
-                                let args_val = message
+                                    .get("submit_at")
+                                    .expect("Missing submit_at in stream message");
+                                let submit_at_str: String =
+                                    redis::from_redis_value(submit_at_val)
+                                        .expect("submit_at not a valid string");
+                                let submit_at = submit_at_str
+                                    .parse::<i64>()
+                                    .expect("submit_at not a valid i64");
+                                let args_val = message_entry
                                     .map
                                     .get("args")
                                     .expect("Missing args in stream message");
                                 let args: Option<String> = redis::from_redis_value(args_val)
                                     .expect("args not a valid string");
-                                let now = tokio::time::Instant::now().elapsed().as_millis();
-                                if now >= schedeled_at {
-                                    let _send_result = processor
+                                let now = Utc::now().timestamp_millis();
+                                if now >= submit_at {
+                                    info!(task_id = %task_id, task_name = %task_name_str, "TimeKeeper: Submitting due task");
+                                    let send_result = processor
                                         .tell(Script {
+                                            id: task_id,
+                                            task_name: task_name_str.clone(),
+                                            args: args.clone(),
+                                        })
+                                        .await;
+                                    if let Err(e) = send_result {
+                                        eprintln!("TimeKeeper: Error sending task {} to processor: {:?}", task_id, e);
+                                    }
+                                    else {
+                                        let _awk:Result<i32, RedisError>= redis.xack(TIMEKEEPER_STREAM_KEY, TASK_GROUP_KEY, &[message_id]).await;
+                                    }
+                                } else {
+                                    info!(task_id = %task_id, task_name = %task_name_str, current_time = %now, due_time = %submit_at, "TimeKeeper: Rescheduling task for later");
+                                    match TimeKeeper::schedule_task(
+                                        redis.clone(),
+                                        ScheduledScript {
                                             id: task_id,
                                             task_name: task_name_str,
                                             args: args,
-                                        })
-                                        .await;
+                                            submit_at,
+                                        },
+                                    )
+                                    .await {
+                                        Ok(_) => {
+                                            let _awk:Result<i32, RedisError>= redis.xack(TIMEKEEPER_STREAM_KEY, TASK_GROUP_KEY, &[message_id]).await;
+                                        }
+                                        Err(e) => {
+                                            eprintln!("TimeKeeper: Failed to reschedule task_id {}. Error: {:?}. Message will not be XACKed and retried later.", task_id, e);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -127,8 +154,13 @@ impl Message<ScheduledScript> for TimeKeeper {
         message: ScheduledScript,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.schedule_task(message).await;
-        OrcaReply { success: true }
+        match TimeKeeper::schedule_task(self.redis.clone(), message).await {
+            Ok(_) => OrcaReply { success: true },
+            Err(e) => {
+                eprintln!("TimeKeeper: Failed to schedule task via handle: {:?}", e);
+                OrcaReply { success: false }
+            }
+        }
     }
 }
 
@@ -140,9 +172,9 @@ impl Actor for TimeKeeper {
         let id = args.id;
         let task_redis = args.redis.clone();
         let task_processor = args.processor.clone();
-
+        
         tokio::spawn(async move {
-            Self::process_scheduled_stream(id, task_redis, task_processor).await;
+            TimeKeeper::process_scheduled_stream(id, task_redis, task_processor).await;
         });
         Ok(args)
     }

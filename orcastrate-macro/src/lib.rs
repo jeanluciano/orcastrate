@@ -112,8 +112,8 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     self
                 }
 
-                pub fn start(mut self, delay: Option<i64>) -> Self{
-                    self.delay_by = delay;
+                pub fn start(mut self, delay: impl Into<Option<i64>>) -> Self{
+                    self.delay_by = delay.into();
                     self
                 }
             }

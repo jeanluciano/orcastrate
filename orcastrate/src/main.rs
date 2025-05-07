@@ -24,12 +24,12 @@ async fn main() {
 
     let task_handle = async_task
     .submit("https://example.com".to_string(), 10)
-    .start(None)
+    .start(10)
     .await;
 
     match task_handle {
         Ok(task_handle) => {
-            let result = task_handle.result(5).await.expect("Getting result failed");
+            let result = task_handle.result(None).await.expect("Getting result failed");
             println!("Result: {}", result);
         }
         Err(e) => {

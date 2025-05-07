@@ -58,7 +58,7 @@ pub struct ScheduledScript {
     pub id: Uuid,
     pub task_name: String,
     pub args: Option<String>,
-    pub scheduled_at: i64,
+    pub submit_at: i64,
 }
 
 
