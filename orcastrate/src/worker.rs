@@ -1,7 +1,9 @@
+use crate::error::OrcaError;
 use crate::messages::{
-    GetResult, ScheduleTask, ScheduledScript, Script, SubmitRun, TransitionState,
+    GetResult, GetResultById, ScheduleTask, ScheduledScript, Script, StartRun, SubmitRun, TransitionState,
 };
 use crate::processors::redis::Processor;
+use crate::seer::{Handler, Seer};
 use crate::task::{StaticTaskDefinition, TaskRun};
 use inventory;
 use kameo::Actor;
@@ -10,8 +12,6 @@ use std::collections::HashMap;
 use tracing::info;
 use tracing_subscriber;
 use uuid::Uuid;
-use crate::error::OrcaError;
-use crate::seer::Seer;
 pub struct Worker {
     id: Uuid,
     url: String,
@@ -52,10 +52,7 @@ impl Actor for Worker {
     type Args = Self;
     type Error = OrcaError;
 
-    async fn on_start(
-        mut args: Self::Args,
-        actor_ref: ActorRef<Self>,
-    ) -> Result<Self, OrcaError> {
+    async fn on_start(mut args: Self::Args, actor_ref: ActorRef<Self>) -> Result<Self, OrcaError> {
         let processor = Processor::spawn(Processor::new(args.id, &args.url, actor_ref).await);
         args.processor = Some(processor);
         Ok(args)
@@ -89,8 +86,46 @@ impl Message<ScheduleTask> for Worker {
     }
 }
 
+impl Message<StartRun> for Worker {
+    type Reply = Result<Handler, OrcaError>;
+    async fn handle(
+        &mut self,
+        message: StartRun,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let task_id = Uuid::new_v4();
+        if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
+            info!("Submitting task: {}:{}", message.task_name, task_id);
+
+            let processor_res = self
+                .processor
+                .as_ref()
+                .unwrap()
+                .ask(Script {
+                    id: task_id,
+                    task_name: message.task_name,
+                    args: message.args,
+                })
+                .await;
+            match processor_res {
+                Ok(processor_res) => {
+                    let run_handle =
+                        Handler::new(self.processor.as_ref().unwrap().clone(), task_id);
+                    Ok(run_handle)
+                }
+                Err(e) => Err(OrcaError(format!("Error submitting task: {}", e))),
+            }
+        } else {
+            Err(OrcaError(format!(
+                "Task {} not registered",
+                message.task_name
+            )))
+        }
+    }
+}
+
 impl Message<SubmitRun> for Worker {
-    type Reply = Result<ActorRef<Seer>, OrcaError>;
+    type Reply = Result<Handler, OrcaError>;
     async fn handle(
         &mut self,
         message: SubmitRun,
@@ -110,8 +145,7 @@ impl Message<SubmitRun> for Worker {
                     args: message.args,
                 })
                 .await;
-            let run_handle =
-                Seer::new(self.processor.as_ref().unwrap().clone());
+            let run_handle = Handler::new(self.processor.as_ref().unwrap().clone(), task_id);
             Ok(run_handle)
         } else {
             Err(OrcaError(format!(
@@ -173,12 +207,12 @@ impl Message<Script> for Worker {
     }
 }
 
-impl Message<GetResult> for Worker {
+impl Message<GetResultById> for Worker {
     type Reply = Result<String, OrcaError>;
 
     async fn handle(
         &mut self,
-        message: GetResult,
+        message: GetResultById,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let res = self.processor.as_ref().unwrap().ask(message).await;

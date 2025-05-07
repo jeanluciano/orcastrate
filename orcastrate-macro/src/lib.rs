@@ -78,23 +78,22 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #func_vis struct #task_struct_name {
                 pub task_name: String,
                 pub worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>,
-                pub task_id: ::uuid::Uuid,
-                pub seer_ref: Option<::kameo::prelude::ActorRef<::orcastrate::seer::Seer>>,
+                pub serialized_args: Option<String>,
+                pub error: Option<String>,
+                pub delay_by: Option<i64>,
             }
 
             impl #task_struct_name {
                  fn register(
                     worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>
                  ) -> Self {
-                    // Initialize task_id to None
-                    let id = ::uuid::Uuid::new_v4();
-                    Self { task_name: #task_name_literal.to_string(), worker_ref, task_id: id, seer_ref: None}
+                    Self { task_name: #task_name_literal.to_string(), worker_ref, serialized_args: None, error: None, delay_by: None }
                 }
                 fn get_worker_id(&self) -> String {
                     self.worker_ref.id().to_string()
                 }
 
-                pub async fn submit(&mut self, #( #task_arg_names: #task_arg_types ),* ) -> Result<&mut Self, ::orcastrate::error::OrcaError>
+                pub fn submit(mut self, #( #task_arg_names: #task_arg_types ),* ) -> Self
                 {
                     let args_struct_instance = #task_args_struct_name {
                         #( #task_arg_names: #task_arg_names.clone() ),*
@@ -103,53 +102,48 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let serialized_args_result = ::serde_json::to_string(&args_struct_instance)
                         .map_err(|e| ::orcastrate::error::OrcaError(format!("Args serialization failed for task '{}': {}", self.task_name, e)));
 
-                    let submit_run_message; // Declare message variable in the outer scope
 
                     if let Ok(serialized_args_string) = serialized_args_result {
-                        submit_run_message = ::orcastrate::messages::SubmitRun {
-                            task_name: self.task_name.clone(),
-                            args: Some(serialized_args_string),
-                            task_id: self.task_id,
-                        };
+                        self.serialized_args = Some(serialized_args_string);
                     } else {
                         // Properly return the serialization error
-                        return Err(serialized_args_result.unwrap_err());
+                        self.error = Some(serialized_args_result.unwrap_err().to_string());
                     }
-
-                    let ask_result = self.worker_ref.ask(submit_run_message).await;
-
-                    match ask_result {
-                        Ok(worker_reply_handle) => {
-                            self.seer_ref = Some(worker_reply_handle);
-                            Ok(self)
-                        }
-                        Err(kameo_err) => {
-                            Err(::orcastrate::error::OrcaError(format!("Kameo ask error for task '{}': {}", self.task_name, kameo_err)))
-                        }
-                    }
+                    self
                 }
-                pub async fn result(&mut self,timeout: Option<::tokio::time::Duration>) -> Result<&Self, ::orcastrate::error::OrcaError> {
-                    let message = ::orcastrate::messages::GetResult {
-                    task_id: self.task_id,
-                    timeout: timeout,
-                    };
-                    let handle = self.seer_ref.as_ref().unwrap().ask(message).await;
-                    match handle {
-                    Ok(worker_reply) => {
-                        // `worker_reply` is Result<(), WorkerError>
-                        // Propagate the worker's result (Ok or Err)
-                        Ok(self)
-                    }
 
-                    Err(kameo_err) => {
-                        // Map the AskError to WorkerError
-                        Err(::orcastrate::error::OrcaError(format!("Kameo ask error: {}", kameo_err)))
+                pub fn start(mut self, delay: Option<i64>) -> Self{
+                    self.delay_by = delay;
+                    self
+                }
             }
-        }
-    }
+            impl ::std::future::IntoFuture for #task_struct_name {
+                type Output = Result<::orcastrate::seer::Handler, ::orcastrate::error::OrcaError>;
+                type IntoFuture = ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Self::Output> + Send>>;
 
+                fn into_future(self) -> Self::IntoFuture {
+                  Box::pin(async move {
+                    if let Some(err_msg) = self.error {
+                        return Err(::orcastrate::error::OrcaError(err_msg));
+                    }
+                    
+                    let message = ::orcastrate::messages::StartRun {
+                        task_name: self.task_name.clone(),
+                        args: self.serialized_args.clone(),
+                        delay: self.delay_by,
+                    };
+                    let seer_ref = self.worker_ref.ask(message).await;
+                    match seer_ref {
+                        Ok(seer_ref) => Ok(seer_ref),
+                        Err(e) => Err(::orcastrate::error::OrcaError(format!("Error starting task: {}", e))),
+                    }
+                  })
+                }
             }
         };
+    
+
+        
 
     // 3. The Original Function Definition (remains unchanged)
     let original_func_def = &func;

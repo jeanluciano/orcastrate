@@ -10,6 +10,16 @@ pub struct SubmitRun {
     pub task_id: Uuid,
 } 
 
+
+#[derive(Debug, Clone)]
+pub struct StartRun {
+    pub task_name: String,
+    pub args: Option<String>,
+    pub delay: Option<i64>,
+}
+
+
+
 #[derive(Debug, Clone)]
 pub struct ScheduleTask {
     pub task_name: String,
@@ -25,7 +35,16 @@ pub struct RunTask {
 #[derive(Debug, Clone)]
 pub struct GetResult {
     pub task_id: Uuid,
-    pub timeout: Option<Duration>,
+    pub timeout: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GetResultById {
+    pub task_id: Uuid,
+}
+
+pub struct HandleResult {
+    pub timeout: Option<i64>,
 }
 
 #[derive(Debug, Clone)]

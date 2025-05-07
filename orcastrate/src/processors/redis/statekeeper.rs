@@ -2,14 +2,13 @@ use crate::messages::*;
 use crate::task::RunState;
 use kameo::prelude::*;
 use redis::aio::MultiplexedConnection;
-use redis::{AsyncCommands};
+use redis::AsyncCommands;
 use std::collections::HashMap;
 use tracing::{error, info};
 use uuid::Uuid;
 use crate::notify::{DeliveryStrategy, Register};
-use crate::notify::{MessageBus};
+use crate::notify::MessageBus;
 use super::{ STATEKEEPER_STREAM_KEY};
-// use crate::task::ListenForResult;
 use crate::error::OrcaError;
 // StateKeeper is responsible for storing the state of the task in Redis and deleting task state when the
 // time to live expires.keeps track of task and index of task in redis stream.
@@ -108,17 +107,17 @@ impl Message<TransitionState> for StateKeeper {
     }
 }
 
-impl Message<GetResult> for StateKeeper {
+impl Message<GetResultById> for StateKeeper {
     type Reply = Result<String, OrcaError>;
 
     async fn handle(
         &mut self,
-        message: GetResult,
+        message: GetResultById,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let task_id = message.task_id;
         let res: redis::RedisResult<Option<String>> = self.redis.hget(&task_id.to_string(), "result").await;
-        info!("StateKeeper received GetResult: {:?}", &res);
+        info!("StateKeeper received GetResultById: {:?}", &res);
 
         match res {
             Ok(result_string) => Ok(result_string.unwrap_or("None".to_string())),

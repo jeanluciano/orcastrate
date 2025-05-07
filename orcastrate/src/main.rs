@@ -22,10 +22,19 @@ async fn main() {
         .await;
     let mut async_task = my_async_task::register(worker.clone());
 
-    let task_handle = async_task.submit("https://example.com".to_string(), 10).await.unwrap();
+    let task_handle = async_task
+    .submit("https://example.com".to_string(), 10)
+    .start(None)
+    .await;
 
-    
-    let _result = task_handle.result(None).await.expect("Getting result failed");
+    match task_handle {
+        Ok(task_handle) => {
+            let _result = task_handle.result(Some(5)).await.expect("Getting result failed");
+        }
+        Err(e) => {
+            println!("Error starting task: {}", e);
+        }
+    }
   
     println!("Main loop running. Tasks are executing asynchronously...");
     loop {

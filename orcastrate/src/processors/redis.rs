@@ -158,12 +158,12 @@ impl Message<TransitionState> for Processor {
     }
 }
 
-impl Message<GetResult> for Processor {
+impl Message<GetResultById> for Processor {
     type Reply = Result<String, OrcaError>;
 
     async fn handle(
         &mut self,
-        message: GetResult,
+        message: GetResultById,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let res = self.statekeeper.as_ref().unwrap().ask(message).await;

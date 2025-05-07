@@ -1,5 +1,5 @@
 use crate::error::OrcaError;
-use crate::messages::{GetResult, ListenForResult, OrcaReply};
+use crate::messages::{GetResult, HandleResult, ListenForResult, OrcaReply, GetResultById};
 use crate::notify::Register;
 use crate::processors::redis::Processor;
 use kameo::prelude::*;
@@ -7,9 +7,8 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use tracing::info;
 use uuid::Uuid;
-
+use tokio::time::Duration;
 pub struct Seer {
-
     task_id: Uuid,
     processor_ref: ActorRef<Processor>, 
     notify_result_ready: Arc<Notify>,
@@ -18,8 +17,8 @@ pub struct Seer {
 impl Seer {
     pub fn new(
         processor_ref: ActorRef<Processor>,
+        task_id: Uuid,
     ) -> ActorRef<Seer> {
-        let task_id = Uuid::new_v4();
         let notify_result_ready = Arc::new(Notify::new());
         Seer::spawn(Self {
             task_id,
@@ -55,17 +54,17 @@ impl Message<ListenForResult> for Seer {
     }
 }
 
-impl Message<GetResult> for Seer {
+impl Message<HandleResult> for Seer {
     type Reply = Result<String, OrcaError>;
 
     async fn handle(
         &mut self,
-        message: GetResult,
+        message: HandleResult,
         _ctx: &mut Context<Seer, Self::Reply>,
     ) -> Self::Reply {
-        let processor_get_result_msg = message.clone();
+        let processor_get_result_msg = GetResultById { task_id: self.task_id };
 
-        let initial_ask_result: Result<String, SendError<GetResult, crate::error::OrcaError>> =
+        let initial_ask_result: Result<String, SendError<GetResultById, crate::error::OrcaError>> =
             self.processor_ref
                 .ask(processor_get_result_msg.clone())
                 .await;
@@ -95,7 +94,7 @@ impl Message<GetResult> for Seer {
                     info!("Notified for result for task {}", self.task_id);
                     // Notification received, try fetching result again
                 }
-                _ = tokio::time::sleep(timeout_duration) => {
+                _ = tokio::time::sleep(Duration::from_secs(timeout_duration as u64)) => {
                     info!("Timeout waiting for result for task {}", self.task_id);
                     // Timeout elapsed, try fetching result one last time or return timeout error
                 }
@@ -114,7 +113,7 @@ impl Message<GetResult> for Seer {
         }
 
         // Attempt to fetch the result again after waiting/notification
-        let final_ask_result: Result<String, SendError<GetResult, crate::error::OrcaError>> =
+        let final_ask_result: Result<String, SendError<GetResultById, crate::error::OrcaError>> =
             self.processor_ref.ask(processor_get_result_msg).await;
 
         match final_ask_result {
@@ -132,3 +131,24 @@ impl Message<GetResult> for Seer {
         }
     }
 }
+
+
+pub struct Handler {
+    seer_ref: ActorRef<Seer>,
+}
+
+impl Handler {
+    pub fn new(actor_ref: ActorRef<Processor>, task_id: Uuid) -> Self {
+        Self { seer_ref: Seer::new(actor_ref, task_id) }
+    }
+    pub async fn result(&self, timeout: Option<i64>) -> Result<String, OrcaError> {
+        
+        let result = self.seer_ref.ask(HandleResult { timeout:timeout }).await;
+        match result {
+            Ok(result) => Ok(result),
+            Err(e) => Err(OrcaError(format!("Error getting result: {}", e))),
+        }
+    }
+}
+
+
