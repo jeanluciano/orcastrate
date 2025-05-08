@@ -1,14 +1,13 @@
+use crate::task::RunState;
 use kameo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::task::RunState;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubmitRun {
     pub task_name: String,
     pub args: Option<String>,
     pub task_id: Uuid,
-} 
-
+}
 
 #[derive(Debug, Clone)]
 pub struct StartRun {
@@ -21,9 +20,7 @@ pub struct StartRun {
 
 pub struct SeerUpdate {
     pub state: RunState,
-
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ScheduleTask {
@@ -67,7 +64,6 @@ pub struct ScheduledScript {
     pub submit_at: i64,
 }
 
-
 #[derive(Reply, Debug, Clone)]
 pub struct OrcaReply {
     pub success: bool,
@@ -81,7 +77,6 @@ pub struct TransitionState {
     pub new_state: RunState,
     pub result: Option<String>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct ListenForResult {

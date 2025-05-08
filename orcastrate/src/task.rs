@@ -11,8 +11,11 @@ use std::pin::Pin;
 use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
-pub type TaskFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
-pub type SerializedTaskFuture = fn(String) -> Result<TaskFuture, OrcaError>;
+
+//This will problably be bytes in the future.
+pub type SerializedTaskData = String;
+pub type TaskFuture = Pin<Box<dyn Future<Output = Result<SerializedTaskData, SerializedTaskData>> + Send>>;
+pub type SerializedTaskFuture = fn(SerializedTaskData) -> Result<TaskFuture, OrcaError>;
 
 #[derive(Clone)]
 pub struct StaticTaskDefinition {
@@ -22,9 +25,7 @@ pub struct StaticTaskDefinition {
 // !!!!!!Do not put any other types in this file. This interacts with the orcastrate-macro.!!!!!!!!!
 inventory::collect!(StaticTaskDefinition);
 // !!!!!!Do not put any other types in this file. This interacts with the orcastrate-macro.!!!!!!!!
-// !!!!!!Do not put any other types in this file. This interacts with the orcastrate-macro.!!!!!!!!
 
-// TaskRun is the main actor that runs the task.
 pub struct TaskRun {
     pub id: Uuid,
     pub name: String,
