@@ -17,6 +17,12 @@ pub struct StartRun {
     pub delay: Option<i64>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+
+pub struct SeerUpdate {
+    pub state: RunState,
+
+}
 
 
 #[derive(Debug, Clone)]

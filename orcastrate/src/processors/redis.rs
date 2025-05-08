@@ -7,8 +7,6 @@ use redis::{RedisError, RedisResult};
 use tracing::debug;
 use tracing::info;
 use uuid::Uuid;
-use crate::notify::Register;
-// use crate::task::ListenForResult;
 use crate::error::OrcaError;
 // Declare modules
 mod gatekeeper;
@@ -171,18 +169,5 @@ impl Message<GetResultById> for Processor {
             Ok(reply) => Ok(reply),
             Err(e) => Err(OrcaError(e.to_string())),
         }
-    }
-}
-
-impl Message<Register<ListenForResult>> for Processor {
-    type Reply = OrcaReply;
-
-    async fn handle(
-        &mut self,
-        message: Register<ListenForResult>,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        let _ = self.statekeeper.as_ref().unwrap().tell( message).await;
-        OrcaReply { success: true }
     }
 }

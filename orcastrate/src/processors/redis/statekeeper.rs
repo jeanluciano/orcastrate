@@ -1,8 +1,6 @@
 use super::STATEKEEPER_STREAM_KEY;
 use crate::error::OrcaError;
 use crate::messages::*;
-use crate::notify::MessageBus;
-use crate::notify::{DeliveryStrategy, Register};
 use crate::task::RunState;
 use kameo::prelude::*;
 use redis::AsyncCommands;
@@ -16,17 +14,17 @@ pub struct StateKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
     tracked_tasks: HashMap<Uuid, String>,
-    message_bus: ActorRef<MessageBus>,
+  
 }
 
 impl StateKeeper {
     pub fn new(id: Uuid, redis: MultiplexedConnection) -> ActorRef<Self> {
-        let message_bus = MessageBus::spawn(MessageBus::new(DeliveryStrategy::Guaranteed));
+
         StateKeeper::spawn(Self {
             id,
             redis,
             tracked_tasks: HashMap::new(),
-            message_bus,
+      
         })
     }
     async fn keep_state(&mut self, state: TransitionState) {
@@ -82,7 +80,6 @@ impl StateKeeper {
     }
 }
 
-
 impl Message<TransitionState> for StateKeeper {
     type Reply = OrcaReply;
 
@@ -126,19 +123,7 @@ impl Message<GetResultById> for StateKeeper {
         }
     }
 }
-impl Message<Register<ListenForResult>> for StateKeeper {
-    type Reply = OrcaReply;
 
-    async fn handle(
-        &mut self,
-        message: Register<ListenForResult>,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        info!("StateKeeper received Register: {:?}", message);
-        let _ = self.message_bus.tell(message).await;
-        OrcaReply { success: true }
-    }
-}
 
 impl Actor for StateKeeper {
     type Args = Self;

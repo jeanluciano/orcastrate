@@ -1,6 +1,7 @@
 use orcastrate::worker::Worker;
 use orcastrate_macro::orca_task;
 use tokio::time::Duration;
+use serde::{Serialize, Deserialize};
 
 #[orca_task]
 async fn my_async_task(url: String, count: i32) -> Result<String, String> {
@@ -14,29 +15,59 @@ async fn my_async_task(url: String, count: i32) -> Result<String, String> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AnySerdeType {
+    option: Option<String>,
+    active: bool,
+}
+
+#[orca_task]
+async fn my_async_task_2(url: String, supports: AnySerdeType) -> Result<String, String> {
+    println!("Running task: url={}, supports={:?}", url, supports);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(format!("Processed {} - Supports: {:?}", url, supports))
+}
+
 
 #[tokio::main]
 async fn main() {
     let worker = Worker::new("redis://localhost:6379".to_string())
+        .swarm()
+        .await
+        .unwrap()
         .run()
         .await;
     let async_task = my_async_task::register(worker.clone());
+    let async_task_2 = my_async_task_2::register(worker.clone());
 
-    let task_handle = async_task
+    let async_task = async_task
     .submit("https://example.com".to_string(), 10)
     .start(10)
     .await;
 
-    match task_handle {
-        Ok(task_handle) => {
-            let result = task_handle.result(None).await.expect("Getting result failed");
+    let async_task_2 = async_task_2
+    .submit("https://example.com".to_string(), AnySerdeType { option: Some("test".to_string()), active: true })
+    .await;
+
+    match async_task {
+        Ok(async_task) => {
+            let result = async_task.result(None).await.expect("Getting result failed");
             println!("Result: {}", result);
         }
         Err(e) => {
             println!("Error starting task: {}", e);
         }
     }
-  
+
+    match async_task_2 {
+        Ok(async_task) => {
+            let result = async_task.result(None).await.expect("Getting result failed");
+            println!("Result: {}", result);
+        }
+        Err(e) => {
+            println!("Error starting task: {}", e);
+        }
+    }
     println!("Main loop running. Tasks are executing asynchronously...");
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;

@@ -1,6 +1,9 @@
+use crate::error::OrcaError;
 use crate::messages::*;
+use crate::seer::Seer;
 use crate::worker::Worker;
 use kameo::Actor;
+use kameo::actor::RemoteActorRef;
 use kameo::prelude::{ActorRef, ActorStopReason, Context, Message, WeakActorRef};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -8,8 +11,6 @@ use std::pin::Pin;
 use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
-use crate::error::OrcaError;
-
 pub type TaskFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 pub type SerializedTaskFuture = fn(String) -> Result<TaskFuture, OrcaError>;
 
@@ -18,10 +19,10 @@ pub struct StaticTaskDefinition {
     pub task_name: &'static str,
     pub task_future: SerializedTaskFuture,
 }
-// !!!!!!Do not put any other code in this file. This interacts with the orcastrate-macro.!!!!!!!!!
+// !!!!!!Do not put any other types in this file. This interacts with the orcastrate-macro.!!!!!!!!!
 inventory::collect!(StaticTaskDefinition);
-// !!!!!!Do not put any other code in this file. This interacts with the orcastrate-macro.!!!!!!!!
-// !!!!!!Do not put any other code in this file. This interacts with the orcastrate-macro.!!!!!!!!
+// !!!!!!Do not put any other types in this file. This interacts with the orcastrate-macro.!!!!!!!!
+// !!!!!!Do not put any other types in this file. This interacts with the orcastrate-macro.!!!!!!!!
 
 // TaskRun is the main actor that runs the task.
 pub struct TaskRun {
@@ -34,17 +35,36 @@ pub struct TaskRun {
     pub args: Option<String>,
     max_retries: u32,
     result: Option<String>,
+    distributed: bool,
+    seer: Option<RemoteActorRef<Seer>>,
 }
 
 impl TaskRun {
-    pub fn new(
+    pub async fn new(
         id: Uuid,
         name: String,
         worker: ActorRef<Worker>,
         future: Option<SerializedTaskFuture>,
         args: Option<String>,
         max_retries: Option<u32>,
+        distributed: bool,
     ) -> ActorRef<TaskRun> {
+        let mut seer: Option<RemoteActorRef<Seer>> = None;
+        if distributed {
+            let lookup_result =
+                RemoteActorRef::<Seer>::lookup(format!("seer-{}", id).as_str()).await;
+            match lookup_result {
+                Ok(seer_ref) => seer = seer_ref,
+                Err(_) => {
+                    info!(
+                        "Error looking up seer for task {},will attempt on state change",
+                        id
+                    );
+                    seer = None;
+                }
+            };
+        }
+
         let args = Self {
             id,
             future,
@@ -55,8 +75,11 @@ impl TaskRun {
             args: args,
             max_retries: max_retries.unwrap_or(0),
             result: None,
+            distributed,
+            seer,
         };
         let task = TaskRun::spawn(args);
+
         task
     }
     async fn transition_to_state(&mut self, new_state_request: RunState) -> Result<(), OrcaError> {
@@ -123,7 +146,10 @@ impl Actor for TaskRun {
         // This is the reason that the future is optional.
         if let Some(future) = args.future.take() {
             let handle = tokio::spawn(async move {
-                info!("Attempting to create future for task {} with retries: {}", task_id, args.max_retries);
+                info!(
+                    "Attempting to create future for task {} with retries: {}",
+                    task_id, args.max_retries
+                );
                 match future(serialized_args.unwrap_or("".to_string())) {
                     Ok(task_future) => {
                         info!("Executing future for task {}", task_id);
@@ -185,12 +211,10 @@ impl Message<TransitionState> for TaskRun {
     }
 }
 
-
 #[derive(Debug)]
 struct FutureResult {
     result: Result<String, String>, // Carries Ok(value) or Err(reason)
 }
-
 
 impl Message<FutureResult> for TaskRun {
     type Reply = (); // No reply needed
@@ -200,7 +224,11 @@ impl Message<FutureResult> for TaskRun {
         message: FutureResult,
         _ctx: &mut Context<TaskRun, Self::Reply>,
     ) -> Self::Reply {
-        info!("Received internal result for task {}: {:?}", self.id, message.result.is_ok());
+        info!(
+            "Received internal result for task {}: {:?}",
+            self.id,
+            message.result.is_ok()
+        );
         let final_state;
         match message.result {
             Ok(res_str) => {
@@ -213,13 +241,44 @@ impl Message<FutureResult> for TaskRun {
                 final_state = RunState::Failed;
             }
         }
-
+        if self.distributed {
+            let seer_ref = self.seer.as_ref();
+            if let Some(seer) = seer_ref {
+                let _ = seer
+                    .tell(&SeerUpdate {
+                        state: final_state.clone(),
+                    })
+                    .await;
+            } else {
+                let lookup_result =
+                    RemoteActorRef::<Seer>::lookup(format!("seer-{}", self.id).as_str()).await;
+                match lookup_result {
+                    Ok(seer) => {
+                        let _ = seer
+                            .unwrap()
+                            .tell(&SeerUpdate {
+                                state: final_state.clone(),
+                            })
+                            .await;
+                    }
+                    Err(_) => {
+                        info!("Error looking up seer for task {}", self.id);
+                    }
+                }
+            }
+        }
         match self.transition_to_state(final_state.clone()).await {
             Ok(_) => {
-                info!("Internal state updated to {} for task {}", final_state, self.id);
+                info!(
+                    "Internal state updated to {} for task {}",
+                    final_state, self.id
+                );
             }
             Err(e) => {
-                eprintln!("State transition to {} failed for Task {}: {}", final_state, self.id, e);
+                eprintln!(
+                    "State transition to {} failed for Task {}: {}",
+                    final_state, self.id, e
+                );
             }
         }
     }
@@ -255,4 +314,3 @@ impl RunState {
         }
     }
 }
-

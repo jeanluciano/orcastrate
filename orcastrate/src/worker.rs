@@ -1,24 +1,26 @@
 use crate::error::OrcaError;
 use crate::messages::{
-    GetResultById, ScheduleTask, ScheduledScript, Script, StartRun, SubmitRun, TransitionState,
+    GetResultById, ScheduledScript, Script, StartRun, TransitionState,
 };
 use crate::processors::redis::Processor;
 use crate::seer::Handler;
 use crate::task::{StaticTaskDefinition, TaskRun};
+use chrono::Utc;
 use inventory;
 use kameo::Actor;
-use kameo::prelude::{ActorRef, Context, Message};
+use kameo::prelude::{ActorRef, Context, Message,ActorSwarm};
 use std::collections::HashMap;
 use tracing::info;
 use tracing_subscriber;
 use uuid::Uuid;
-use chrono::Utc;
+
 pub struct Worker {
     id: Uuid,
     url: String,
     pub registered_tasks: HashMap<String, StaticTaskDefinition>,
     pub task_runs: HashMap<Uuid, ActorRef<TaskRun>>,
     processor: Option<ActorRef<Processor>>,
+    swarm: Option<&'static ActorSwarm>,
 }
 
 impl Worker {
@@ -40,7 +42,14 @@ impl Worker {
             task_runs: HashMap::new(),
             registered_tasks,
             processor: None,
+            swarm: None,
         }
+    }
+    pub async fn swarm(mut self) -> Result<Self, Box<dyn std::error::Error>> {
+        let swarm = ActorSwarm::bootstrap()?;
+        swarm.listen_on("/ip4/0.0.0.0/udp/8020/quic-v1".parse()?).await?;
+        self.swarm = Some(swarm);
+        Ok(self)
     }
     pub async fn run(self) -> ActorRef<Self> {
         let worker_actor = Self::spawn(self);
@@ -70,11 +79,9 @@ impl Message<StartRun> for Worker {
     ) -> Self::Reply {
         let task_id = Uuid::new_v4();
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
-            info!("Submitting task: {}:{}", message.task_name, task_id);
-
             let processor_result_for_match: Result<(), OrcaError>;
             let now = Utc::now().timestamp_millis();
-
+            let distributed = self.swarm.is_some();
             if let Some(delay) = message.delay {
                 let submit_at_ms = now + delay * 1000;
                 processor_result_for_match = self
@@ -100,14 +107,14 @@ impl Message<StartRun> for Worker {
                         args: message.args,
                     })
                     .await
-                    .map(|_| ()) 
+                    .map(|_| ())
                     .map_err(|e| OrcaError(format!("Error sending task: {}", e)));
             }
 
             match processor_result_for_match {
                 Ok(()) => {
                     let run_handle =
-                        Handler::new(self.processor.as_ref().unwrap().clone(), task_id);
+                        Handler::new(self.processor.as_ref().unwrap().clone(), task_id, distributed).await;
                     Ok(run_handle)
                 }
                 Err(e) => Err(e), // e is already OrcaError
@@ -151,6 +158,7 @@ impl Message<Script> for Worker {
         let name = &message.task_name;
         let id = message.id;
         let args = message.args.clone();
+        let distributed = self.swarm.is_some();
         info!("Worker received script: {:?}", &message);
         if let Some(orca) = self.registered_tasks.get(name) {
             let orca = TaskRun::new(
@@ -160,7 +168,8 @@ impl Message<Script> for Worker {
                 Some(orca.task_future.clone()),
                 args,
                 None,
-            );
+                distributed
+            ).await;
             self.task_runs.insert(id, orca);
             Ok(())
         } else {
