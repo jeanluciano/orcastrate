@@ -21,4 +21,7 @@ inventory = "0.3.20"
 thiserror = "2.0.12"
 chrono = "0.4.41"
 tokio-retry = "0.3.0"
-libp2p = "0.55.0"
+libp2p = {version = "0.55.0",features = ["tokio", "gossipsub", "mdns", "noise", "macros", "tcp", "yamux", "quic"] }
+io = "0.0.2"
+futures = "0.3.31"
+

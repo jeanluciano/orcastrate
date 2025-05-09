@@ -2,9 +2,11 @@ use crate::error::OrcaError;
 use crate::messages::{
     GetResultById, ScheduledScript, Script, StartRun, TransitionState,
 };
+
 use crate::processors::redis::Processor;
 use crate::seer::Handler;
 use crate::task::{StaticTaskDefinition, TaskRun};
+use crate::swarm::start_swarm;
 use chrono::Utc;
 use inventory;
 use kameo::Actor;
@@ -22,6 +24,9 @@ pub struct Worker {
     processor: Option<ActorRef<Processor>>,
     swarm: Option<&'static ActorSwarm>,
 }
+
+
+
 
 impl Worker {
     pub fn new(url: String) -> Self {
@@ -46,8 +51,7 @@ impl Worker {
         }
     }
     pub async fn swarm(mut self) -> Result<Self, Box<dyn std::error::Error>> {
-        let swarm = ActorSwarm::bootstrap()?;
-        swarm.listen_on("/ip4/0.0.0.0/udp/8020/quic-v1".parse()?).await?;
+        let swarm = start_swarm(8020).await?;
         self.swarm = Some(swarm);
         Ok(self)
     }
