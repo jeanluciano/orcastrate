@@ -2,6 +2,10 @@ use crate::task::RunState;
 use kameo::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use kameo::prelude::Message;
+
+pub const TASK_COMPLETION_TOPIC: &str = "task-completions";
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SubmitRun {
     pub task_name: String,
@@ -81,4 +85,20 @@ pub struct TransitionState {
 #[derive(Debug, Clone)]
 pub struct ListenForResult {
     pub task_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GossipTaskCompleted {
+    pub task_id: String,
+}
+
+
+pub struct PublishCompletion {
+    pub task_id: String,
+}
+
+
+pub struct InternalGossipReceived {
+    pub task_id: String,
+    pub peer_id: String,
 }

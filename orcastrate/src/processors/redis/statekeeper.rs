@@ -8,23 +8,24 @@ use redis::aio::MultiplexedConnection;
 use std::collections::HashMap;
 use tracing::{error, info};
 use uuid::Uuid;
+
 // StateKeeper is responsible for storing the state of the task in Redis and deleting task state when the
 // time to live expires.keeps track of task and index of task in redis stream.
 pub struct StateKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
     tracked_tasks: HashMap<Uuid, String>,
-  
+    swarm: Option<&'static ActorSwarm>,
 }
 
 impl StateKeeper {
-    pub fn new(id: Uuid, redis: MultiplexedConnection) -> ActorRef<Self> {
+    pub fn new(id: Uuid, redis: MultiplexedConnection, swarm: Option<&'static ActorSwarm>) -> ActorRef<Self> {
 
         StateKeeper::spawn(Self {
             id,
             redis,
             tracked_tasks: HashMap::new(),
-      
+            swarm,
         })
     }
     async fn keep_state(&mut self, state: TransitionState) {

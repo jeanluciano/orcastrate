@@ -6,15 +6,17 @@ use crate::messages::{
 use crate::processors::redis::Processor;
 use crate::seer::Handler;
 use crate::task::{StaticTaskDefinition, TaskRun};
-use crate::swarm::start_swarm;
+use crate::swarm::{start_swarm, SWARM_CMD_TX, SwarmControlCommand};
 use chrono::Utc;
 use inventory;
 use kameo::Actor;
 use kameo::prelude::{ActorRef, Context, Message,ActorSwarm};
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{info, error, warn};
 use tracing_subscriber;
 use uuid::Uuid;
+use libp2p::gossipsub::IdentTopic;
+use crate::messages::TASK_COMPLETION_TOPIC;
 
 pub struct Worker {
     id: Uuid,
@@ -59,6 +61,27 @@ impl Worker {
         let worker_actor = Self::spawn(self);
         worker_actor.wait_for_startup().await;
         worker_actor
+    }
+
+    async fn publish_signature_to_gossip(&self, signature: String) {
+        if let Some(cmd_tx) = SWARM_CMD_TX.lock().unwrap().as_ref() {
+            let topic = IdentTopic::new(TASK_COMPLETION_TOPIC);
+            let data = signature.clone().into_bytes();
+            info!("Worker {} sending PublishGossip command for signature: {}", self.id, signature);
+            let cmd = SwarmControlCommand::PublishGossip { topic, data };
+            if let Err(e) = cmd_tx.send(cmd).await {
+                error!(
+                    "Worker {} failed to send PublishGossip command to swarm loop for signature \'{}\': {:?}",
+                    self.id, signature, e
+                );
+            } else {
+                info!("Worker {} successfully sent PublishGossip command for signature '{}'.", self.id, signature);
+            }
+        } else {
+            error!(
+                "Worker {} cannot publish signature: SWARM_CMD_TX not available.", self.id
+            );
+        }
     }
 }
 
