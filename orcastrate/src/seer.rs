@@ -1,16 +1,16 @@
 use crate::error::OrcaError;
-use crate::messages::{HandleResult, GetResultById, SeerUpdate};
+use crate::messages::{GetResultById, HandleResult, UpdateSeer};
 use crate::processors::redis::Processor;
+use crate::task::RunState;
 use kameo::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Notify;
+use tokio::time::Duration;
 use tracing::info;
 use uuid::Uuid;
-use tokio::time::Duration;
-use crate::task::RunState;
 pub struct Seer {
     task_id: Uuid,
-    processor_ref: ActorRef<Processor>, 
+    processor_ref: ActorRef<Processor>,
     notify_result_ready: Arc<Notify>,
     distributed: bool,
     run_state: Option<RunState>,
@@ -39,12 +39,14 @@ impl Actor for Seer {
 
     async fn on_start(args: Self::Args, actor_ref: ActorRef<Seer>) -> Result<Self, OrcaError> {
         if args.distributed {
-            let res = actor_ref.register(format!("seer-{}", args.task_id).as_str()).await;
+            let res = actor_ref
+                .register(format!("seer-{}", args.task_id).as_str())
+                .await;
             match res {
                 Ok(_) => {
                     info!("Registered seer for task {}", args.task_id);
                 }
-                Err(e) => {
+                Err(_) => {
                     info!("Error registering seer for task {}", args.task_id);
                 }
             }
@@ -61,7 +63,9 @@ impl Message<HandleResult> for Seer {
         message: HandleResult,
         _ctx: &mut Context<Seer, Self::Reply>,
     ) -> Self::Reply {
-        let processor_get_result_msg = GetResultById { task_id: self.task_id };
+        let processor_get_result_msg = GetResultById {
+            task_id: self.task_id,
+        };
 
         let initial_ask_result: Result<String, SendError<GetResultById, crate::error::OrcaError>> =
             self.processor_ref
@@ -131,17 +135,17 @@ impl Message<HandleResult> for Seer {
     }
 }
 
-impl RemoteActor for Seer { 
+impl RemoteActor for Seer {
     const REMOTE_ID: &'static str = "seer";
 }
 
 #[remote_message("cba440bd-f8f6-4b2f-b72b-2762f468c009")]
-impl Message<SeerUpdate> for Seer {
+impl Message<UpdateSeer> for Seer {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        message: SeerUpdate,
+        message: UpdateSeer,
         _ctx: &mut Context<Seer, Self::Reply>,
     ) -> Self::Reply {
         info!("Received SeerUpdate for task {}", self.task_id);
@@ -161,23 +165,27 @@ impl Message<SeerUpdate> for Seer {
     }
 }
 
-
 pub struct Handler {
     seer_ref: ActorRef<Seer>,
 }
 
 impl Handler {
     pub async fn new(actor_ref: ActorRef<Processor>, task_id: Uuid, distributed: bool) -> Self {
-        Self { seer_ref: Seer::new(actor_ref, task_id, distributed).await }
+        Self {
+            seer_ref: Seer::new(actor_ref, task_id, distributed).await,
+        }
     }
     pub async fn result(&self, timeout: impl Into<Option<i64>>) -> Result<String, OrcaError> {
         let timeout_option: Option<i64> = timeout.into();
-        let result = self.seer_ref.ask(HandleResult { timeout: timeout_option }).await;
+        let result = self
+            .seer_ref
+            .ask(HandleResult {
+                timeout: timeout_option,
+            })
+            .await;
         match result {
             Ok(result) => Ok(result),
             Err(e) => Err(OrcaError(format!("Error getting result: {}", e))),
         }
     }
 }
-
-

@@ -110,7 +110,7 @@ impl Actor for Processor {
         let gatekeeper = GateKeeper::new(id, gatekeeper_conn, worker_clone);
         args.gatekeeper = Some(gatekeeper);
 
-        let statekeeper = StateKeeper::new(id, statekeeper_conn, args.swarm.clone());
+        let statekeeper = StateKeeper::new(id, statekeeper_conn);
         args.statekeeper = Some(statekeeper);
 
         Ok(args)

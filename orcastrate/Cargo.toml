@@ -25,4 +25,5 @@ libp2p = {version = "0.55.0",features = ["tokio", "gossipsub", "mdns", "noise", 
 io = "0.0.2"
 futures = "0.3.31"
 once_cell = "1.21.3"
+sha2 = "0.10.9"
 

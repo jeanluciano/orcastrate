@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 //This will problably be bytes in the future.
 pub type SerializedTaskData = String;
-pub type TaskFuture = Pin<Box<dyn Future<Output = Result<SerializedTaskData, SerializedTaskData>> + Send>>;
+pub type TaskFuture =
+    Pin<Box<dyn Future<Output = Result<SerializedTaskData, SerializedTaskData>> + Send>>;
 pub type SerializedTaskFuture = fn(SerializedTaskData) -> Result<TaskFuture, OrcaError>;
 
 #[derive(Clone)]
@@ -38,6 +39,7 @@ pub struct TaskRun {
     result: Option<String>,
     distributed: bool,
     seer: Option<RemoteActorRef<Seer>>,
+
 }
 
 impl TaskRun {
@@ -246,7 +248,7 @@ impl Message<FutureResult> for TaskRun {
             let seer_ref = self.seer.as_ref();
             if let Some(seer) = seer_ref {
                 let _ = seer
-                    .tell(&SeerUpdate {
+                    .tell(&UpdateSeer {
                         state: final_state.clone(),
                     })
                     .await;
@@ -257,7 +259,7 @@ impl Message<FutureResult> for TaskRun {
                     Ok(seer) => {
                         let _ = seer
                             .unwrap()
-                            .tell(&SeerUpdate {
+                            .tell(&UpdateSeer {
                                 state: final_state.clone(),
                             })
                             .await;
@@ -283,6 +285,13 @@ impl Message<FutureResult> for TaskRun {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CachePolicy {
+    Omnipotent,
+    Signature,
+    Source,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

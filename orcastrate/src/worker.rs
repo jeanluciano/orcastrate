@@ -1,8 +1,8 @@
 use crate::error::OrcaError;
 use crate::messages::{
-    GetResultById, ScheduledScript, Script, StartRun, TransitionState,
+    CreateRun, GetResultById, ScheduledScript, Script, TransitionState,
 };
-
+use sha2::{Sha256, Digest};
 use crate::processors::redis::Processor;
 use crate::seer::Handler;
 use crate::task::{StaticTaskDefinition, TaskRun};
@@ -27,9 +27,6 @@ pub struct Worker {
     swarm: Option<&'static ActorSwarm>,
 }
 
-
-
-
 impl Worker {
     pub fn new(url: String) -> Self {
         let subscriber = tracing_subscriber::fmt::Subscriber::builder()
@@ -53,7 +50,7 @@ impl Worker {
         }
     }
     pub async fn swarm(mut self) -> Result<Self, Box<dyn std::error::Error>> {
-        let swarm = start_swarm(8020).await?;
+        let swarm = start_swarm(6969).await?;
         self.swarm = Some(swarm);
         Ok(self)
     }
@@ -97,11 +94,11 @@ impl Actor for Worker {
 }
 
 // Message handlers
-impl Message<StartRun> for Worker {
+impl Message<CreateRun> for Worker {
     type Reply = Result<Handler, OrcaError>;
     async fn handle(
         &mut self,
-        message: StartRun,
+        message: CreateRun,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let task_id = Uuid::new_v4();
@@ -226,4 +223,10 @@ impl Message<GetResultById> for Worker {
         };
         result_string
     }
+}
+
+pub fn hash_string(input: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(input.as_bytes());
+    format!("{:x}", hash.finalize())
 }

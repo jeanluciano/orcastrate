@@ -15,17 +15,15 @@ pub struct StateKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
     tracked_tasks: HashMap<Uuid, String>,
-    swarm: Option<&'static ActorSwarm>,
 }
 
 impl StateKeeper {
-    pub fn new(id: Uuid, redis: MultiplexedConnection, swarm: Option<&'static ActorSwarm>) -> ActorRef<Self> {
+    pub fn new(id: Uuid, redis: MultiplexedConnection) -> ActorRef<Self> {
 
         StateKeeper::spawn(Self {
             id,
             redis,
             tracked_tasks: HashMap::new(),
-            swarm,
         })
     }
     async fn keep_state(&mut self, state: TransitionState) {
