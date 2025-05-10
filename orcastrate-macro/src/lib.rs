@@ -15,7 +15,7 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func_name = &func.sig.ident;
     let func_vis = &func.vis;
 
-    let return_type = &func.sig.output;
+    let return_type = &func.sig.output; 
     let (ok_type, err_type) = match return_type {
         ReturnType::Type(_, ty) => {
             if let syn::Type::Path(type_path) = &**ty {
@@ -58,13 +58,14 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let task_arg_names: Vec<_> = task_args.iter().map(|pt| &pt.pat).collect();
     let task_arg_types: Vec<_> = task_args.iter().map(|pt| &pt.ty).collect();
-
+    
     // --- Generated Names ---
     let task_struct_name = format_ident!("{}", func_name.to_string()); // e.g., `my_async_task` struct
     let task_args_struct_name = format_ident!("{}Args", func_name.to_string()); // e.g., `MyAsyncTaskArgs`
     let future_creator_fn_name = format_ident!("create_{}_future", func_name);
     let task_name_literal = func_name.to_string();
-
+    let return_type_str = quote!(#return_type).to_string();
+    let func_string = quote!(#func_name).to_string();
     // 1. Argument Struct (for serialization)
     let args_struct_def = quote! {
         #[derive(::serde::Serialize, ::serde::Deserialize, Debug, Clone)]
@@ -81,13 +82,15 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 pub serialized_args: Option<String>,
                 pub error: Option<String>,
                 pub delay_by: Option<i64>,
+                pub signature: Option<String>,
+                pub cache_policy: ::orcastrate::task::CachePolicy,
             }
 
             impl #task_struct_name {
                  fn register(
                     worker_ref: ::kameo::prelude::ActorRef<::orcastrate::worker::Worker>
                  ) -> Self {
-                    Self { task_name: #task_name_literal.to_string(), worker_ref, serialized_args: None, error: None, delay_by: None }
+                    Self { task_name: #task_name_literal.to_string(), worker_ref, serialized_args: None, error: None, delay_by: None, signature: None, cache_policy: ::orcastrate::task::CachePolicy::Omnipotent }
                 }
                 fn get_worker_id(&self) -> String {
                     self.worker_ref.id().to_string()
@@ -111,6 +114,26 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                     self
                 }
+                // makes hash of args function name and return type
+                pub fn cache(mut self, cache_policy: ::orcastrate::task::CachePolicy) -> Self {
+                    match cache_policy {
+                        ::orcastrate::task::CachePolicy::Signature => {
+                            let args_str = self.serialized_args.clone().unwrap_or("".to_string());
+                            let signature = ::orcastrate::worker::hash_string(&format!("{}-{}-{}", self.task_name, args_str, #return_type_str));
+                            self.signature = Some(signature);
+                            self.cache_policy = cache_policy;
+                        }
+                        ::orcastrate::task::CachePolicy::Source => {
+                            let signature = ::orcastrate::worker::hash_string(&format!("{}",#func_string));
+                            self.signature = Some(signature);
+                            self.cache_policy = cache_policy;
+                        }
+                        ::orcastrate::task::CachePolicy::Omnipotent => {
+                            println!("Cache policy is omnipotent");
+                        }
+                    }
+                    self
+                }
 
                 pub fn start(mut self, delay: impl Into<Option<i64>>) -> Self{
                     self.delay_by = delay.into();
@@ -127,10 +150,12 @@ pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         return Err(::orcastrate::error::OrcaError(err_msg));
                     }
                     
-                    let message = ::orcastrate::messages::StartRun {
+                    let message = ::orcastrate::messages::CreateTaskRun {
                         task_name: self.task_name.clone(),
                         args: self.serialized_args.clone(),
                         delay: self.delay_by,
+                        cache_policy: self.cache_policy,
+                        signature: self.signature.clone(),
                     };
                     let seer_ref = self.worker_ref.ask(message).await;
                     match seer_ref {

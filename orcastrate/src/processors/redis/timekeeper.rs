@@ -8,6 +8,7 @@ use redis::{AsyncCommands, RedisError};
 use tracing::{debug, info};
 use uuid::Uuid;
 use chrono::prelude::*;
+
 pub struct TimeKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
@@ -33,12 +34,12 @@ impl TimeKeeper {
         // TODO: Implement scheduling logic (e.g., writing to TASK_SCHEDULED_STREAM_KEY)
     }
 
-    pub async fn schedule_task(mut redis: MultiplexedConnection, script: ScheduledScript) -> Result<(), RedisError> {
+    pub async fn schedule_task(mut redis: MultiplexedConnection, task: ScheduledTask) -> Result<(), RedisError> {
         let key_values: &[(&str, &str)] = &[
-            ("task_name", &script.task_name),
-            ("task_id", &script.id.to_string()),
-            ("submit_at", &script.submit_at.to_string()),
-            ("args", &script.args.unwrap_or("".to_string())),
+            ("task_name", &task.task_name),
+            ("task_id", &task.id.to_string()),
+            ("submit_at", &task.submit_at.to_string()),
+            ("args", &task.args.unwrap_or("".to_string())),
         ];
         redis
             .xadd::<&str, &str, &str, &str, String>(TIMEKEEPER_STREAM_KEY, "*", &key_values)
@@ -101,10 +102,11 @@ impl TimeKeeper {
                                 if now >= submit_at {
                                     info!(task_id = %task_id, task_name = %task_name_str, "TimeKeeper: Submitting due task");
                                     let send_result = processor
-                                        .tell(Script {
+                                        .tell(ScheduledTask {
                                             id: task_id,
                                             task_name: task_name_str.clone(),
                                             args: args.clone(),
+                                            submit_at,
                                         })
                                         .await;
                                     if let Err(e) = send_result {
@@ -117,7 +119,7 @@ impl TimeKeeper {
                                     info!(task_id = %task_id, task_name = %task_name_str, current_time = %now, due_time = %submit_at, "TimeKeeper: Rescheduling task for later");
                                     match TimeKeeper::schedule_task(
                                         redis.clone(),
-                                        ScheduledScript {
+                                        ScheduledTask {
                                             id: task_id,
                                             task_name: task_name_str,
                                             args: args,
@@ -146,12 +148,12 @@ impl TimeKeeper {
     }
 }
 
-impl Message<ScheduledScript> for TimeKeeper {
+impl Message<ScheduledTask> for TimeKeeper {
     type Reply = OrcaReply;
 
     async fn handle(
         &mut self,
-        message: ScheduledScript,
+        message: ScheduledTask,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         match TimeKeeper::schedule_task(self.redis.clone(), message).await {

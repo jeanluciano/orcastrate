@@ -1,3 +1,4 @@
+use crate::error::OrcaError;
 use crate::messages::*;
 use crate::worker::Worker;
 use kameo::prelude::*;
@@ -7,7 +8,7 @@ use redis::{RedisError, RedisResult};
 use tracing::debug;
 use tracing::info;
 use uuid::Uuid;
-use crate::error::OrcaError;
+use crate::messages::{SubmitTask, ScheduledTask, TransitionState};
 // Declare modules
 mod gatekeeper;
 mod statekeeper;
@@ -117,12 +118,12 @@ impl Actor for Processor {
     }
 }
 
-impl Message<Script> for Processor {
+impl Message<SubmitTask> for Processor {
     type Reply = Result<(), OrcaError>;
 
     async fn handle(
         &mut self,
-        message: Script,
+        message: SubmitTask,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         info!("Processor received Script: {:?}", &message);
@@ -131,12 +132,12 @@ impl Message<Script> for Processor {
     }
 }
 
-impl Message<ScheduledScript> for Processor {
+impl Message<ScheduledTask> for Processor {
     type Reply = OrcaReply;
 
     async fn handle(
         &mut self,
-        message: ScheduledScript,
+        message: ScheduledTask,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let _ = self.timekeeper.as_ref().unwrap().tell(message).await;

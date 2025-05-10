@@ -87,7 +87,7 @@ impl GateKeeper {
         }
     }
 
-    fn parse_script(map: &HashMap<String, redis::Value>) -> Result<Script, String> {
+    fn parse_script(map: &HashMap<String, redis::Value>) -> Result<SubmitTask, String> {
         let task_id_val = map.get("id").ok_or("Missing task_id")?;
         let task_id_str: String = redis::from_redis_value(task_id_val)
             .map_err(|e| format!("task_id not string: {}", e))?;
@@ -102,14 +102,14 @@ impl GateKeeper {
         let args: Option<String> =
             redis::from_redis_value(args_val).map_err(|e| format!("args not string: {}", e))?;
 
-        Ok(Script {
+        Ok(SubmitTask {
             task_name,
             id,
             args,
         })
     }
 
-    pub async fn publish_script(&mut self, message: Script) -> RedisResult<String> {
+    pub async fn publish_script(&mut self, message: SubmitTask) -> RedisResult<String> {
         info!("GateKeeper submitting script: {:?}", message);
 
         let key_values: &[(&str, String)] = &[
@@ -125,12 +125,12 @@ impl GateKeeper {
     }
 }
 
-impl Message<Script> for GateKeeper {
+impl Message<SubmitTask> for GateKeeper {
     type Reply = Result<(), RedisError>;
 
     async fn handle(
         &mut self,
-        message: Script,
+        message: SubmitTask,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let _ = self.publish_script(message).await;

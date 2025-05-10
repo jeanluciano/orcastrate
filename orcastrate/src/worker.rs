@@ -1,6 +1,6 @@
 use crate::error::OrcaError;
 use crate::messages::{
-    CreateRun, GetResultById, ScheduledScript, Script, TransitionState,
+    CreateTaskRun, GetResultById, ScheduledTask, SubmitTask, TransitionState,
 };
 use sha2::{Sha256, Digest};
 use crate::processors::redis::Processor;
@@ -94,11 +94,11 @@ impl Actor for Worker {
 }
 
 // Message handlers
-impl Message<CreateRun> for Worker {
+impl Message<CreateTaskRun> for Worker {
     type Reply = Result<Handler, OrcaError>;
     async fn handle(
         &mut self,
-        message: CreateRun,
+        message: CreateTaskRun,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let task_id = Uuid::new_v4();
@@ -112,7 +112,7 @@ impl Message<CreateRun> for Worker {
                     .processor
                     .as_ref()
                     .unwrap()
-                    .tell(ScheduledScript {
+                    .tell(ScheduledTask {
                         id: task_id,
                         task_name: message.task_name.clone(),
                         args: message.args.clone(),
@@ -125,7 +125,7 @@ impl Message<CreateRun> for Worker {
                     .processor
                     .as_ref()
                     .unwrap()
-                    .ask(Script {
+                    .ask(SubmitTask {
                         id: task_id,
                         task_name: message.task_name,
                         args: message.args,
@@ -171,12 +171,12 @@ impl Message<TransitionState> for Worker {
     }
 }
 
-impl Message<Script> for Worker {
+impl Message<SubmitTask> for Worker {
     type Reply = Result<(), OrcaError>;
 
     async fn handle(
         &mut self,
-        message: Script,
+        message: SubmitTask,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let name = &message.task_name;

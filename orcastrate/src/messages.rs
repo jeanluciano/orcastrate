@@ -5,8 +5,9 @@ use uuid::Uuid;
 use crate::task::CachePolicy;
 pub const TASK_COMPLETION_TOPIC: &str = "task-completions";
 
+
 #[derive(Debug, Clone)]
-pub struct CreateRun {
+pub struct CreateTaskRun {
     pub task_name: String,
     pub args: Option<String>,
     pub delay: Option<i64>,
@@ -28,14 +29,21 @@ pub struct HandleResult {
 }
 
 #[derive(Debug, Clone)]
-pub struct Script {
+pub struct SubmitTask {
     pub id: Uuid,
     pub task_name: String,
     pub args: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ScheduledScript {
+pub struct RunTask {
+    pub id: Uuid,
+    pub task_name: String,
+    pub args: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduledTask {
     pub id: Uuid,
     pub task_name: String,
     pub args: Option<String>,
