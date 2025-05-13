@@ -160,7 +160,7 @@ impl Message<TransitionState> for Processor {
 }
 
 impl Message<GetResultById> for Processor {
-    type Reply = Result<String, OrcaError>;
+    type Reply = Result<Option<String>, OrcaError>;
 
     async fn handle(
         &mut self,

@@ -9,7 +9,7 @@ use tokio::time::Duration;
 use tracing::info;
 use uuid::Uuid;
 pub struct Seer {
-    task_id: Uuid,
+    task_id: String,
     processor_ref: ActorRef<Processor>,
     notify_result_ready: Arc<Notify>,
     distributed: bool,
@@ -19,7 +19,7 @@ pub struct Seer {
 impl Seer {
     pub async fn new(
         processor_ref: ActorRef<Processor>,
-        task_id: Uuid,
+        task_id: String,
         distributed: bool,
     ) -> ActorRef<Seer> {
         let notify_result_ready = Arc::new(Notify::new());
@@ -64,17 +64,17 @@ impl Message<HandleResult> for Seer {
         _ctx: &mut Context<Seer, Self::Reply>,
     ) -> Self::Reply {
         let processor_get_result_msg = GetResultById {
-            task_id: self.task_id,
+            task_id: self.task_id.clone(),
         };
 
-        let initial_ask_result: Result<String, SendError<GetResultById, crate::error::OrcaError>> =
+        let initial_ask_result: Result<Option<String>, SendError<GetResultById, crate::error::OrcaError>> =
             self.processor_ref
                 .ask(processor_get_result_msg.clone())
                 .await;
 
         match initial_ask_result {
-            Ok(result_str) if result_str != "None" => {
-                return Ok(result_str);
+            Ok(result_option) if result_option.is_some() => {
+                return Ok(result_option.unwrap());
             }
             Ok(_none_result) => {
                 info!(
@@ -116,11 +116,11 @@ impl Message<HandleResult> for Seer {
         }
 
         // Attempt to fetch the result again after waiting/notification
-        let final_ask_result: Result<String, SendError<GetResultById, crate::error::OrcaError>> =
+        let final_ask_result: Result<Option<String>, SendError<GetResultById, crate::error::OrcaError>> =
             self.processor_ref.ask(processor_get_result_msg).await;
 
         match final_ask_result {
-            Ok(result_str) if result_str != "None" => Ok(result_str),
+            Ok(result_option) if result_option.is_some() => Ok(result_option.unwrap()),
             Ok(_none_result) => Err(OrcaError(format!(
                 "Result still 'None' for task {} after waiting",
                 self.task_id
@@ -170,7 +170,7 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub async fn new(actor_ref: ActorRef<Processor>, task_id: Uuid, distributed: bool) -> Self {
+    pub async fn new(actor_ref: ActorRef<Processor>, task_id: String, distributed: bool) -> Self {
         Self {
             seer_ref: Seer::new(actor_ref, task_id, distributed).await,
         }

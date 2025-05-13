@@ -11,6 +11,7 @@ use std::pin::Pin;
 use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
+use redis;
 
 //This will problably be bytes in the future.
 pub type SerializedTaskData = String;
@@ -28,7 +29,7 @@ inventory::collect!(StaticTaskDefinition);
 // !!!!!!Do not put any other types in this file. This interacts with the orcastrate-macro.!!!!!!!!
 
 pub struct TaskRun {
-    pub id: Uuid,
+    pub id: String,
     pub name: String,
     pub future: Option<SerializedTaskFuture>,
     state: RunState,
@@ -44,7 +45,7 @@ pub struct TaskRun {
 
 impl TaskRun {
     pub async fn new(
-        id: Uuid,
+        id: String,
         name: String,
         worker: ActorRef<Worker>,
         future: Option<SerializedTaskFuture>,
@@ -114,7 +115,7 @@ impl TaskRun {
                     .worker
                     .tell(TransitionState {
                         task_name: self.name.clone(),
-                        task_id: self.id,
+                        task_id: self.id.clone(),
                         args: self.args.clone().unwrap_or("".to_string()),
                         new_state: self.state.clone(),
                         result: self.result.clone(),
@@ -292,6 +293,21 @@ pub enum CachePolicy {
     Omnipotent,
     Signature,
     Source,
+}
+
+impl redis::FromRedisValue for CachePolicy {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+        let s: String = redis::FromRedisValue::from_redis_value(v)?;
+        match s.as_str() {
+            "Omnipotent" => Ok(CachePolicy::Omnipotent),
+            "Signature" => Ok(CachePolicy::Signature),
+            "Source" => Ok(CachePolicy::Source),
+            _ => Err(redis::RedisError::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid CachePolicy value",
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

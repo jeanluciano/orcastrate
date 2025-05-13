@@ -17,12 +17,13 @@ use tracing_subscriber;
 use uuid::Uuid;
 use libp2p::gossipsub::IdentTopic;
 use crate::messages::TASK_COMPLETION_TOPIC;
-
+use crate::task::CachePolicy;
+use crate::swarm::RESERVED_SIGNATURES;
 pub struct Worker {
     id: Uuid,
     url: String,
     pub registered_tasks: HashMap<String, StaticTaskDefinition>,
-    pub task_runs: HashMap<Uuid, ActorRef<TaskRun>>,
+    pub task_runs: HashMap<String, ActorRef<TaskRun>>,
     processor: Option<ActorRef<Processor>>,
     swarm: Option<&'static ActorSwarm>,
 }
@@ -101,11 +102,24 @@ impl Message<CreateTaskRun> for Worker {
         message: CreateTaskRun,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let task_id = Uuid::new_v4();
+        let task_id = match message.cache_policy {
+            CachePolicy::Signature => {
+                message.signature.unwrap()
+            }
+            CachePolicy::Source => {
+                message.signature.unwrap()
+            }
+            CachePolicy::Omnipotent => {
+                Uuid::new_v4().to_string()
+            }
+        };
+
+
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
             let processor_result_for_match: Result<(), OrcaError>;
             let now = Utc::now().timestamp_millis();
             let distributed = self.swarm.is_some();
+
             if let Some(delay) = message.delay {
                 let submit_at_ms = now + delay * 1000;
                 processor_result_for_match = self
@@ -113,22 +127,25 @@ impl Message<CreateTaskRun> for Worker {
                     .as_ref()
                     .unwrap()
                     .tell(ScheduledTask {
-                        id: task_id,
+                        id: task_id.clone(),
                         task_name: message.task_name.clone(),
                         args: message.args.clone(),
                         submit_at: submit_at_ms,
+                        cache_policy: message.cache_policy,
                     })
                     .await
                     .map_err(|e| OrcaError(format!("Error sending scheduled task: {}", e)));
             } else {
+
                 processor_result_for_match = self
                     .processor
                     .as_ref()
                     .unwrap()
                     .ask(SubmitTask {
-                        id: task_id,
+                        id: task_id.clone(),
                         task_name: message.task_name,
                         args: message.args,
+                        cache_policy: message.cache_policy,
                     })
                     .await
                     .map(|_| ())
@@ -138,7 +155,7 @@ impl Message<CreateTaskRun> for Worker {
             match processor_result_for_match {
                 Ok(()) => {
                     let run_handle =
-                        Handler::new(self.processor.as_ref().unwrap().clone(), task_id, distributed).await;
+                        Handler::new(self.processor.as_ref().unwrap().clone(), task_id.clone(), distributed).await;
                     Ok(run_handle)
                 }
                 Err(e) => Err(e), // e is already OrcaError
@@ -179,15 +196,47 @@ impl Message<SubmitTask> for Worker {
         message: SubmitTask,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let name = &message.task_name;
-        let id = message.id;
+        // Check if result already exists
+        let result_check = self.processor.as_ref().unwrap()
+            .ask(GetResultById { task_id: message.id.clone() })
+            .await;
+
+        if let Ok(_) = result_check {
+            match result_check {
+                Ok(Some(_)) => {
+                    info!("Task {} already has a result, skipping execution", message.id);
+                    return Ok(());
+                }
+                Ok(None) => {
+                    info!("No existing result found for task {}, proceeding to execute.", message.id);
+                }
+                Err(e) => {
+                    error!("Error checking for existing result for task {}: {:?}", message.id, e);
+                }
+            }
+        }
+
+        // Check and reserve signatures for Signature and Source policies
+        if matches!(message.cache_policy, CachePolicy::Signature | CachePolicy::Source) {
+            let mut reserved = RESERVED_SIGNATURES.lock().unwrap();
+            if reserved.contains(&message.id) {
+                info!("Signature {} is already reserved, skipping execution", message.id);
+                return Ok(());
+            }
+            // Reserve the signature before proceeding
+            reserved.insert(message.id.clone());
+            info!("Reserved signature {} for execution", message.id);
+        }
+
+        let name = message.task_name.clone();
+        let id = message.id.clone();
         let args = message.args.clone();
         let distributed = self.swarm.is_some();
         info!("Worker received script: {:?}", &message);
-        if let Some(orca) = self.registered_tasks.get(name) {
+        if let Some(orca) = self.registered_tasks.get(&name) {
             let orca = TaskRun::new(
-                id,
-                name.to_string(),
+                id.clone(),
+                name,
                 ctx.actor_ref(),
                 Some(orca.task_future.clone()),
                 args,
@@ -213,11 +262,17 @@ impl Message<GetResultById> for Worker {
         message: GetResultById,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        let task_id = message.task_id.clone();
         let res = self.processor.as_ref().unwrap().ask(message).await;
         let result_string = match res {
             Ok(result_string) => {
-                info!("Result: {}", &result_string);
-                Ok(result_string)
+                if let Some(result) = result_string {
+                    info!("Result: {}", &result);
+                    Ok(result)
+                } else {
+                    info!("Result not found for task {}", task_id);
+                    Err(OrcaError(format!("Result not found for task {}", task_id)))
+                }
             }
             Err(send_error) => Err(OrcaError(send_error.to_string())),
         };

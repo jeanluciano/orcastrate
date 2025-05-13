@@ -14,7 +14,7 @@ use uuid::Uuid;
 pub struct StateKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
-    tracked_tasks: HashMap<Uuid, String>,
+    tracked_tasks: HashMap<String, String>,
 }
 
 impl StateKeeper {
@@ -48,7 +48,7 @@ impl StateKeeper {
             .await;
         match res {
             Ok(_) => {
-                self.tracked_tasks.insert(task_id, res.unwrap());
+                self.tracked_tasks.insert(task_id.clone(), res.unwrap());
                 info!("StateKeeper kept state for task {}", task_id);
             }
             Err(e) => {
@@ -62,9 +62,8 @@ impl StateKeeper {
     async fn _delete_state(&mut self, _task_id: Uuid) {
         todo!()
     }
-    async fn keep_result_hash(&mut self, task_id: Uuid, result: String) {
-        let task_id_str = task_id.to_string();
-        let res: redis::RedisResult<i64> = self.redis.hset(&task_id_str, "result", &result).await;
+    async fn keep_result_hash(&mut self, task_id: String, result: String) {
+        let res: redis::RedisResult<i64> = self.redis.hset(&task_id, "result", &result).await;
 
         match res {
             Ok(_) => {
@@ -92,7 +91,7 @@ impl Message<TransitionState> for StateKeeper {
         match message.new_state {
             RunState::Running => self.keep_state(message).await,
             RunState::Completed => {
-                self.keep_result_hash(message.task_id, message.result.unwrap())
+                self.keep_result_hash(message.task_id.clone(), message.result.unwrap())
                     .await
             }
             RunState::Failed => info!(
@@ -104,7 +103,7 @@ impl Message<TransitionState> for StateKeeper {
     }
 }
 impl Message<GetResultById> for StateKeeper {
-    type Reply = Result<String, OrcaError>;
+    type Reply = Result<Option<String>, OrcaError>;
 
     async fn handle(
         &mut self,
@@ -117,7 +116,8 @@ impl Message<GetResultById> for StateKeeper {
         info!("StateKeeper received GetResultById: {:?}", &res);
 
         match res {
-            Ok(result_string) => Ok(result_string.unwrap_or("None".to_string())),
+            Ok(Some(value)) => Ok(Some(value)),
+            Ok(None) => Ok(None),
             Err(e) => Err(OrcaError(e.to_string())),
         }
     }

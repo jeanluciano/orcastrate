@@ -8,6 +8,7 @@ use redis::{AsyncCommands, RedisError};
 use tracing::{debug, info};
 use uuid::Uuid;
 use chrono::prelude::*;
+use crate::task::CachePolicy;
 
 pub struct TimeKeeper {
     id: Uuid,
@@ -40,6 +41,7 @@ impl TimeKeeper {
             ("task_id", &task.id.to_string()),
             ("submit_at", &task.submit_at.to_string()),
             ("args", &task.args.unwrap_or("".to_string())),
+            ("cache_policy", &format!("{:?}", task.cache_policy)),
         ];
         redis
             .xadd::<&str, &str, &str, &str, String>(TIMEKEEPER_STREAM_KEY, "*", &key_values)
@@ -80,8 +82,6 @@ impl TimeKeeper {
                                     .expect("Missing task_id in stream message");
                                 let task_id_str: String = redis::from_redis_value(task_id_val)
                                     .expect("task_id not a valid string");
-                                let task_id = Uuid::parse_str(&task_id_str)
-                                    .expect("task_id not a valid UUID");
                                 let submit_at_val = message_entry
                                     .map
                                     .get("submit_at")
@@ -99,31 +99,38 @@ impl TimeKeeper {
                                 let args: Option<String> = redis::from_redis_value(args_val)
                                     .expect("args not a valid string");
                                 let now = Utc::now().timestamp_millis();
+                                let cache_policy_val = message_entry
+                                    .map
+                                    .get("cache_policy")
+                                    .expect("Missing cache_policy in stream message");
+                                let cache_policy: CachePolicy = redis::from_redis_value(cache_policy_val)
+                                    .expect("cache_policy not a valid string");
                                 if now >= submit_at {
-                                    info!(task_id = %task_id, task_name = %task_name_str, "TimeKeeper: Submitting due task");
+                                    info!(task_id = %task_id_str, task_name = %task_name_str, "TimeKeeper: Submitting due task");
                                     let send_result = processor
-                                        .tell(ScheduledTask {
-                                            id: task_id,
+                                        .tell(SubmitTask {
+                                            id: task_id_str.clone(),
                                             task_name: task_name_str.clone(),
                                             args: args.clone(),
-                                            submit_at,
+                                            cache_policy: cache_policy,
                                         })
                                         .await;
                                     if let Err(e) = send_result {
-                                        eprintln!("TimeKeeper: Error sending task {} to processor: {:?}", task_id, e);
+                                        eprintln!("TimeKeeper: Error sending task {} to processor: {:?}", task_id_str, e);
                                     }
                                     else {
                                         let _awk:Result<i32, RedisError>= redis.xack(TIMEKEEPER_STREAM_KEY, TASK_GROUP_KEY, &[message_id]).await;
                                     }
                                 } else {
-                                    info!(task_id = %task_id, task_name = %task_name_str, current_time = %now, due_time = %submit_at, "TimeKeeper: Rescheduling task for later");
+                                    info!(task_id = %task_id_str, task_name = %task_name_str, current_time = %now, due_time = %submit_at, "TimeKeeper: Rescheduling task for later");
                                     match TimeKeeper::schedule_task(
                                         redis.clone(),
                                         ScheduledTask {
-                                            id: task_id,
+                                            id: task_id_str.clone(),
                                             task_name: task_name_str,
                                             args: args,
                                             submit_at,
+                                            cache_policy: cache_policy,
                                         },
                                     )
                                     .await {
@@ -131,7 +138,7 @@ impl TimeKeeper {
                                             let _awk:Result<i32, RedisError>= redis.xack(TIMEKEEPER_STREAM_KEY, TASK_GROUP_KEY, &[message_id]).await;
                                         }
                                         Err(e) => {
-                                            eprintln!("TimeKeeper: Failed to reschedule task_id {}. Error: {:?}. Message will not be XACKed and retried later.", task_id, e);
+                                            eprintln!("TimeKeeper: Failed to reschedule task_id {}. Error: {:?}. Message will not be XACKed and retried later.", task_id_str, e);
                                         }
                                     }
                                 }

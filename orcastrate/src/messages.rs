@@ -22,33 +22,36 @@ pub struct UpdateSeer {
 
 #[derive(Debug, Clone)]
 pub struct GetResultById {
-    pub task_id: Uuid,
+    pub task_id: String,
 }
 pub struct HandleResult {
     pub timeout: Option<i64>,
 }
+#[derive(Debug, Clone)]
+pub struct ScheduledTask {
+    pub id: String,
+    pub task_name: String,
+    pub args: Option<String>,
+    pub submit_at: i64,
+    pub cache_policy: CachePolicy,
+}
+
 
 #[derive(Debug, Clone)]
 pub struct SubmitTask {
-    pub id: Uuid,
+    pub id: String,
     pub task_name: String,
     pub args: Option<String>,
+    pub cache_policy: CachePolicy,
 }
 
 #[derive(Debug, Clone)]
 pub struct RunTask {
-    pub id: Uuid,
+    pub id: String,
     pub task_name: String,
     pub args: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ScheduledTask {
-    pub id: Uuid,
-    pub task_name: String,
-    pub args: Option<String>,
-    pub submit_at: i64,
-}
 
 #[derive(Reply, Debug, Clone)]
 pub struct OrcaReply {
@@ -58,7 +61,7 @@ pub struct OrcaReply {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransitionState {
     pub task_name: String,
-    pub task_id: Uuid,
+    pub task_id: String,
     pub args: String,
     pub new_state: RunState,
     pub result: Option<String>,
@@ -66,6 +69,6 @@ pub struct TransitionState {
 
 #[derive(Debug, Clone)]
 pub struct ListenForResult {
-    pub task_id: Uuid,
+    pub task_id: String,
 }
 
