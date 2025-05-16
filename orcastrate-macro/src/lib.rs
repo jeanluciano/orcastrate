@@ -4,7 +4,8 @@ use quote::{format_ident, quote};
 use syn::{FnArg, ItemFn, ReturnType, parse_macro_input};
 
 #[proc_macro_attribute]
-pub fn orca_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn orca_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    
     let func = parse_macro_input!(item as ItemFn);
 
     // --- Check for Generics (Not Supported) ---

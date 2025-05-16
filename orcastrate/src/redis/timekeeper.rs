@@ -1,4 +1,4 @@
-use super::{Processor, TASK_GROUP_KEY, TIMEKEEPER_STREAM_KEY};
+use super::{TASK_GROUP_KEY, TIMEKEEPER_STREAM_KEY};
 use crate::messages::*;
 use kameo::Actor;
 use kameo::prelude::{ActorRef, Context, Message};
@@ -9,23 +9,23 @@ use tracing::{debug, info};
 use uuid::Uuid;
 use chrono::prelude::*;
 use crate::task::CachePolicy;
-
+use super::gatekeeper::GateKeeper;
 pub struct TimeKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
-    processor: ActorRef<Processor>,
+    gatekeeper: ActorRef<GateKeeper>,
 }
 
 impl TimeKeeper {
     pub fn new(
         id: Uuid,
         redis: MultiplexedConnection,
-        processor: ActorRef<Processor>,
+        gatekeeper: ActorRef<GateKeeper>,
     ) -> ActorRef<Self> {
         TimeKeeper::spawn(Self {
             id,
             redis,
-            processor,
+            gatekeeper,
         })
     }
 
@@ -52,7 +52,7 @@ impl TimeKeeper {
     pub async fn process_scheduled_stream(
         id: Uuid,
         mut redis: MultiplexedConnection,
-        processor: ActorRef<Processor>,
+        gatekeeper: ActorRef<GateKeeper>
     ) {
         let opts = StreamReadOptions::default()
             .group(TASK_GROUP_KEY, &id.to_string())
@@ -107,7 +107,7 @@ impl TimeKeeper {
                                     .expect("cache_policy not a valid string");
                                 if now >= submit_at {
                                     info!(task_id = %task_id_str, task_name = %task_name_str, "TimeKeeper: Submitting due task");
-                                    let send_result = processor
+                                    let send_result = gatekeeper
                                         .tell(SubmitTask {
                                             id: task_id_str.clone(),
                                             task_name: task_name_str.clone(),
@@ -180,10 +180,9 @@ impl Actor for TimeKeeper {
         debug!("TimeKeeper starting with id: {}", args.id);
         let id = args.id;
         let task_redis = args.redis.clone();
-        let task_processor = args.processor.clone();
-        
+        let gatekeeper = args.gatekeeper.clone();
         tokio::spawn(async move {
-            TimeKeeper::process_scheduled_stream(id, task_redis, task_processor).await;
+            TimeKeeper::process_scheduled_stream(id, task_redis, gatekeeper).await;
         });
         Ok(args)
     }

@@ -40,7 +40,7 @@ pub struct TaskRun {
     result: Option<String>,
     distributed: bool,
     seer: Option<RemoteActorRef<Seer>>,
-
+    ttl: i64,
 }
 
 impl TaskRun {
@@ -69,6 +69,7 @@ impl TaskRun {
             };
         }
 
+        let ttl = 60 * 60 * 24;
         let args = Self {
             id,
             future,
@@ -81,6 +82,7 @@ impl TaskRun {
             result: None,
             distributed,
             seer,
+            ttl,
         };
         let task = TaskRun::spawn(args);
 
@@ -119,6 +121,7 @@ impl TaskRun {
                         args: self.args.clone().unwrap_or("".to_string()),
                         new_state: self.state.clone(),
                         result: self.result.clone(),
+                        ttl: self.ttl,
                     })
                     .await
                     .map_err(|e| {

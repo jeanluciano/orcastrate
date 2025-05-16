@@ -8,9 +8,6 @@ use redis::aio::MultiplexedConnection;
 use std::collections::HashMap;
 use tracing::{error, info};
 use uuid::Uuid;
-
-// StateKeeper is responsible for storing the state of the task in Redis and deleting task state when the
-// time to live expires.keeps track of task and index of task in redis stream.
 pub struct StateKeeper {
     id: Uuid,
     redis: MultiplexedConnection,
@@ -19,7 +16,6 @@ pub struct StateKeeper {
 
 impl StateKeeper {
     pub fn new(id: Uuid, redis: MultiplexedConnection) -> ActorRef<Self> {
-
         StateKeeper::spawn(Self {
             id,
             redis,
@@ -122,7 +118,6 @@ impl Message<GetResultById> for StateKeeper {
         }
     }
 }
-
 
 impl Actor for StateKeeper {
     type Args = Self;

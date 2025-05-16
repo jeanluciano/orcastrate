@@ -1,16 +1,16 @@
 use crate::error::OrcaError;
 use crate::messages::{GetResultById, HandleResult, UpdateSeer};
-use crate::processors::redis::Processor;
+use crate::redis::statekeeper::StateKeeper;
 use crate::task::RunState;
 use kameo::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::time::Duration;
 use tracing::info;
-use uuid::Uuid;
+
 pub struct Seer {
     task_id: String,
-    processor_ref: ActorRef<Processor>,
+    statekeeper_ref: ActorRef<StateKeeper>,
     notify_result_ready: Arc<Notify>,
     distributed: bool,
     run_state: Option<RunState>,
@@ -18,14 +18,14 @@ pub struct Seer {
 
 impl Seer {
     pub async fn new(
-        processor_ref: ActorRef<Processor>,
+        statekeeper_ref: ActorRef<StateKeeper>,
         task_id: String,
         distributed: bool,
     ) -> ActorRef<Seer> {
         let notify_result_ready = Arc::new(Notify::new());
         Seer::spawn(Self {
             task_id,
-            processor_ref,
+            statekeeper_ref,
             notify_result_ready,
             distributed,
             run_state: None,
@@ -67,10 +67,13 @@ impl Message<HandleResult> for Seer {
             task_id: self.task_id.clone(),
         };
 
-        let initial_ask_result: Result<Option<String>, SendError<GetResultById, crate::error::OrcaError>> =
-            self.processor_ref
-                .ask(processor_get_result_msg.clone())
-                .await;
+        let initial_ask_result: Result<
+            Option<String>,
+            SendError<GetResultById, crate::error::OrcaError>,
+        > = self
+            .statekeeper_ref
+            .ask(processor_get_result_msg.clone())
+            .await;
 
         match initial_ask_result {
             Ok(result_option) if result_option.is_some() => {
@@ -116,8 +119,10 @@ impl Message<HandleResult> for Seer {
         }
 
         // Attempt to fetch the result again after waiting/notification
-        let final_ask_result: Result<Option<String>, SendError<GetResultById, crate::error::OrcaError>> =
-            self.processor_ref.ask(processor_get_result_msg).await;
+        let final_ask_result: Result<
+            Option<String>,
+            SendError<GetResultById, crate::error::OrcaError>,
+        > = self.statekeeper_ref.ask(processor_get_result_msg).await;
 
         match final_ask_result {
             Ok(result_option) if result_option.is_some() => Ok(result_option.unwrap()),
@@ -170,7 +175,7 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub async fn new(actor_ref: ActorRef<Processor>, task_id: String, distributed: bool) -> Self {
+    pub async fn new(actor_ref: ActorRef<StateKeeper>, task_id: String, distributed: bool) -> Self {
         Self {
             seer_ref: Seer::new(actor_ref, task_id, distributed).await,
         }

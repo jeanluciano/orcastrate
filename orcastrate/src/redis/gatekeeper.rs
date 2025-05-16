@@ -1,18 +1,18 @@
 use crate::messages::*;
+use crate::task::CachePolicy;
 use crate::worker::Worker;
 use kameo::prelude::*;
 use redis::aio::MultiplexedConnection;
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::{AsyncCommands, RedisError, RedisResult};
 use std::collections::HashMap;
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 use uuid::Uuid;
-use crate::task::CachePolicy;
 
 use super::{GATEKEEPER_STREAM_KEY, TASK_GROUP_KEY};
+use crate::messages::TASK_COMPLETION_TOPIC;
 use crate::swarm::{SWARM_CMD_TX, SwarmControlCommand};
 use libp2p::gossipsub::IdentTopic;
-use crate::messages::TASK_COMPLETION_TOPIC;
 
 pub struct GateKeeper {
     id: Uuid,
@@ -121,7 +121,10 @@ impl GateKeeper {
         let task_id = message.id.clone(); // Clone id for potential later use
 
         // 1. Check if signature is already locally reserved (for Signature/Source policies)
-        if matches!(message.cache_policy, CachePolicy::Signature | CachePolicy::Source) {
+        if matches!(
+            message.cache_policy,
+            CachePolicy::Signature | CachePolicy::Source
+        ) {
             let reserved_set = crate::swarm::RESERVED_SIGNATURES.lock().unwrap();
             if reserved_set.contains(&task_id) {
                 info!(
@@ -146,17 +149,22 @@ impl GateKeeper {
         ];
 
         // 3. Attempt to add the task to the Redis stream
-        match self.redis.xadd(GATEKEEPER_STREAM_KEY, "*", key_values).await {
+        match self
+            .redis
+            .xadd(GATEKEEPER_STREAM_KEY, "*", key_values)
+            .await
+        {
             Ok(stream_id) => {
                 info!(
                     "GateKeeper successfully added task {} to stream {}. Stream ID: {}",
-                    task_id,
-                    GATEKEEPER_STREAM_KEY,
-                    stream_id
+                    task_id, GATEKEEPER_STREAM_KEY, stream_id
                 );
 
                 // 4. On successful xadd, reserve locally and publish via Gossipsub (if applicable)
-                if matches!(message.cache_policy, CachePolicy::Signature | CachePolicy::Source) {
+                if matches!(
+                    message.cache_policy,
+                    CachePolicy::Signature | CachePolicy::Source
+                ) {
                     // a. Reserve locally
                     {
                         // Scope to ensure lock is dropped quickly

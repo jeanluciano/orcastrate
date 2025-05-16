@@ -1,4 +1,4 @@
-use orcastrate::worker::Worker;
+use orcastrate::worker::run;
 use orcastrate_macro::orca_task;
 use tokio::time::Duration;
 use serde::{Serialize, Deserialize};
@@ -31,12 +31,7 @@ async fn my_async_task_2(url: String, supports: AnySerdeType) -> Result<String, 
 
 #[tokio::main]
 async fn main() {
-    let worker = Worker::new("redis://localhost:6379".to_string())
-        .swarm()
-        .await
-        .unwrap()
-        .run()
-        .await;
+    let worker = run("redis://localhost:6379");
     let async_task = my_async_task::register(worker.clone());
     let async_task_2 = my_async_task_2::register(worker.clone());
 

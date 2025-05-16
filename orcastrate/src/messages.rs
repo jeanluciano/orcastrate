@@ -1,7 +1,6 @@
 use crate::task::RunState;
 use kameo::prelude::*;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use crate::task::CachePolicy;
 pub const TASK_COMPLETION_TOPIC: &str = "task-completions";
 
@@ -65,6 +64,7 @@ pub struct TransitionState {
     pub args: String,
     pub new_state: RunState,
     pub result: Option<String>,
+    pub ttl: i64,
 }
 
 #[derive(Debug, Clone)]

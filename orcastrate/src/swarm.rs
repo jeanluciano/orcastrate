@@ -9,6 +9,7 @@ use kameo::{
 };
 use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Swarm, SwarmBuilder,
+    core::multiaddr::Protocol,
     gossipsub::{
         Behaviour, ConfigBuilder, Event, IdentTopic, Message, MessageAuthenticity, MessageId,
         PublishError, ValidationMode,
@@ -20,7 +21,6 @@ use libp2p::{
     mdns,
     request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
     swarm::{NetworkBehaviour, SwarmEvent},
-    core::multiaddr::Protocol,
 };
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
@@ -49,10 +49,7 @@ pub static RESERVED_SIGNATURES: Lazy<Mutex<HashSet<String>>> =
 // Command for the swarm loop
 #[derive(Debug)]
 pub enum SwarmControlCommand {
-    PublishGossip {
-        topic: IdentTopic,
-        data: Vec<u8>,
-    },
+    PublishGossip { topic: IdentTopic, data: Vec<u8> },
 }
 
 // Channel for swarm commands
@@ -73,14 +70,14 @@ pub async fn start_swarm(port: u16) -> Result<&'static ActorSwarm, Box<dyn std::
                 key.public().to_peer_id(),
                 MemoryStore::new(key.public().to_peer_id()),
             );
-            
-        // Add bootstrap nodes !!!this only for local testing TODO: remove
+
+            // Add bootstrap nodes !!!this only for local testing TODO: remove
             let bootstrap_nodes = vec![
                 "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
                 "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
                 "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
             ];
-            
+
             for addr in bootstrap_nodes {
                 if let Ok(addr) = addr.parse::<Multiaddr>() {
                     kademlia.add_address(&key.public().to_peer_id(), addr);

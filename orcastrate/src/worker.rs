@@ -1,35 +1,30 @@
 use crate::error::OrcaError;
-use crate::messages::{
-    CreateTaskRun, GetResultById, ScheduledTask, SubmitTask, TransitionState,
-};
-use sha2::{Sha256, Digest};
-use crate::processors::redis::Processor;
+use crate::messages::{CreateTaskRun, GetResultById, ScheduledTask, SubmitTask, TransitionState};
+use crate::redis::ensure_streams;
+use crate::redis::gatekeeper::GateKeeper;
+use crate::redis::statekeeper::StateKeeper;
+use crate::redis::timekeeper::TimeKeeper;
 use crate::seer::Handler;
+use crate::swarm::RESERVED_SIGNATURES;
+use crate::swarm::start_swarm;
+use crate::task::CachePolicy;
 use crate::task::{StaticTaskDefinition, TaskRun};
-use crate::swarm::{start_swarm, SWARM_CMD_TX, SwarmControlCommand};
 use chrono::Utc;
 use inventory;
 use kameo::Actor;
-use kameo::prelude::{ActorRef, Context, Message,ActorSwarm};
+use kameo::prelude::{ActorRef, ActorSwarm, Context, Message};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use tracing::{info, error, warn};
+use tracing::{error, info};
 use tracing_subscriber;
 use uuid::Uuid;
-use libp2p::gossipsub::IdentTopic;
-use crate::messages::TASK_COMPLETION_TOPIC;
-use crate::task::CachePolicy;
-use crate::swarm::RESERVED_SIGNATURES;
-pub struct Worker {
+pub struct WorkerConfig {
     id: Uuid,
-    url: String,
-    pub registered_tasks: HashMap<String, StaticTaskDefinition>,
-    pub task_runs: HashMap<String, ActorRef<TaskRun>>,
-    processor: Option<ActorRef<Processor>>,
-    swarm: Option<&'static ActorSwarm>,
+    url: &'static str,
 }
 
-impl Worker {
-    pub fn new(url: String) -> Self {
+impl WorkerConfig {
+    pub fn new(url: &'static str) -> Self {
         let subscriber = tracing_subscriber::fmt::Subscriber::builder()
             .compact()
             .without_time()
@@ -37,60 +32,53 @@ impl Worker {
 
         tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
         let id = Uuid::new_v4();
+
+        Self { id, url }
+    }
+}
+
+pub fn run(url: &'static str) -> ActorRef<Worker> {
+    let worker = Worker::spawn(WorkerConfig::new(url));
+    worker
+}
+
+pub struct Worker {
+    id: Uuid,
+    url: &'static str,
+    pub registered_tasks: HashMap<String, StaticTaskDefinition>,
+    pub task_runs: HashMap<String, ActorRef<TaskRun>>,
+    swarm: &'static ActorSwarm,
+    gatekeeper: ActorRef<GateKeeper>,
+    timekeeper: ActorRef<TimeKeeper>,
+    statekeeper: ActorRef<StateKeeper>,
+}
+
+impl Actor for Worker {
+    type Args = WorkerConfig;
+    type Error = OrcaError;
+
+    async fn on_start(args: Self::Args, actor_ref: ActorRef<Self>) -> Result<Self, OrcaError> {
+        let client = redis::Client::open(args.url).unwrap();
+        let redis = client.get_multiplexed_async_connection().await.unwrap();
+        let gatekeeper = GateKeeper::new(args.id, redis.clone(), actor_ref);
+        let timekeeper = TimeKeeper::new(args.id, redis.clone(), gatekeeper.clone());
+        let statekeeper = StateKeeper::new(args.id, redis.clone());
         let mut registered_tasks: HashMap<String, StaticTaskDefinition> = HashMap::new();
         for task_def in inventory::iter::<StaticTaskDefinition> {
             registered_tasks.insert(task_def.task_name.to_string(), task_def.clone());
         }
-        Self {
-            id,
-            url,
-            task_runs: HashMap::new(),
+        ensure_streams(redis.clone()).await.unwrap();
+        let swarm = start_swarm(6969).await.unwrap();
+        Ok(Worker {
+            id: args.id,
+            url: args.url,
             registered_tasks,
-            processor: None,
-            swarm: None,
-        }
-    }
-    pub async fn swarm(mut self) -> Result<Self, Box<dyn std::error::Error>> {
-        let swarm = start_swarm(6969).await?;
-        self.swarm = Some(swarm);
-        Ok(self)
-    }
-    pub async fn run(self) -> ActorRef<Self> {
-        let worker_actor = Self::spawn(self);
-        worker_actor.wait_for_startup().await;
-        worker_actor
-    }
-
-    async fn publish_signature_to_gossip(&self, signature: String) {
-        if let Some(cmd_tx) = SWARM_CMD_TX.lock().unwrap().as_ref() {
-            let topic = IdentTopic::new(TASK_COMPLETION_TOPIC);
-            let data = signature.clone().into_bytes();
-            info!("Worker {} sending PublishGossip command for signature: {}", self.id, signature);
-            let cmd = SwarmControlCommand::PublishGossip { topic, data };
-            if let Err(e) = cmd_tx.send(cmd).await {
-                error!(
-                    "Worker {} failed to send PublishGossip command to swarm loop for signature \'{}\': {:?}",
-                    self.id, signature, e
-                );
-            } else {
-                info!("Worker {} successfully sent PublishGossip command for signature '{}'.", self.id, signature);
-            }
-        } else {
-            error!(
-                "Worker {} cannot publish signature: SWARM_CMD_TX not available.", self.id
-            );
-        }
-    }
-}
-
-impl Actor for Worker {
-    type Args = Self;
-    type Error = OrcaError;
-
-    async fn on_start(mut args: Self::Args, actor_ref: ActorRef<Self>) -> Result<Self, OrcaError> {
-        let processor = Processor::spawn(Processor::new(args.id, &args.url, actor_ref).await);
-        args.processor = Some(processor);
-        Ok(args)
+            task_runs: HashMap::new(),
+            swarm,
+            gatekeeper,
+            timekeeper,
+            statekeeper,
+        })
     }
 }
 
@@ -103,29 +91,20 @@ impl Message<CreateTaskRun> for Worker {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let task_id = match message.cache_policy {
-            CachePolicy::Signature => {
-                message.signature.unwrap()
-            }
-            CachePolicy::Source => {
-                message.signature.unwrap()
-            }
-            CachePolicy::Omnipotent => {
-                Uuid::new_v4().to_string()
-            }
+            CachePolicy::Signature => message.signature.unwrap(),
+            CachePolicy::Source => message.signature.unwrap(),
+            CachePolicy::Omnipotent => Uuid::new_v4().to_string(),
         };
-
 
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
             let processor_result_for_match: Result<(), OrcaError>;
             let now = Utc::now().timestamp_millis();
-            let distributed = self.swarm.is_some();
+            let distributed = true;
 
             if let Some(delay) = message.delay {
                 let submit_at_ms = now + delay * 1000;
                 processor_result_for_match = self
-                    .processor
-                    .as_ref()
-                    .unwrap()
+                    .timekeeper
                     .tell(ScheduledTask {
                         id: task_id.clone(),
                         task_name: message.task_name.clone(),
@@ -136,11 +115,8 @@ impl Message<CreateTaskRun> for Worker {
                     .await
                     .map_err(|e| OrcaError(format!("Error sending scheduled task: {}", e)));
             } else {
-
                 processor_result_for_match = self
-                    .processor
-                    .as_ref()
-                    .unwrap()
+                    .gatekeeper
                     .ask(SubmitTask {
                         id: task_id.clone(),
                         task_name: message.task_name,
@@ -155,7 +131,7 @@ impl Message<CreateTaskRun> for Worker {
             match processor_result_for_match {
                 Ok(()) => {
                     let run_handle =
-                        Handler::new(self.processor.as_ref().unwrap().clone(), task_id.clone(), distributed).await;
+                        Handler::new(self.statekeeper.clone(), task_id.clone(), distributed).await;
                     Ok(run_handle)
                 }
                 Err(e) => Err(e), // e is already OrcaError
@@ -177,7 +153,7 @@ impl Message<TransitionState> for Worker {
         message: TransitionState,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let res = self.processor.as_ref().unwrap().ask(message).await;
+        let res = self.statekeeper.ask(message).await;
         match res {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -197,30 +173,48 @@ impl Message<SubmitTask> for Worker {
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         // Check if result already exists
-        let result_check = self.processor.as_ref().unwrap()
-            .ask(GetResultById { task_id: message.id.clone() })
+        let result_check = self
+            .statekeeper
+            .ask(GetResultById {
+                task_id: message.id.clone(),
+            })
             .await;
 
         if let Ok(_) = result_check {
             match result_check {
                 Ok(Some(_)) => {
-                    info!("Task {} already has a result, skipping execution", message.id);
+                    info!(
+                        "Task {} already has a result, skipping execution",
+                        message.id
+                    );
                     return Ok(());
                 }
                 Ok(None) => {
-                    info!("No existing result found for task {}, proceeding to execute.", message.id);
+                    info!(
+                        "No existing result found for task {}, proceeding to execute.",
+                        message.id
+                    );
                 }
                 Err(e) => {
-                    error!("Error checking for existing result for task {}: {:?}", message.id, e);
+                    error!(
+                        "Error checking for existing result for task {}: {:?}",
+                        message.id, e
+                    );
                 }
             }
         }
 
         // Check and reserve signatures for Signature and Source policies
-        if matches!(message.cache_policy, CachePolicy::Signature | CachePolicy::Source) {
+        if matches!(
+            message.cache_policy,
+            CachePolicy::Signature | CachePolicy::Source
+        ) {
             let mut reserved = RESERVED_SIGNATURES.lock().unwrap();
             if reserved.contains(&message.id) {
-                info!("Signature {} is already reserved, skipping execution", message.id);
+                info!(
+                    "Signature {} is already reserved, skipping execution",
+                    message.id
+                );
                 return Ok(());
             }
             // Reserve the signature before proceeding
@@ -231,7 +225,7 @@ impl Message<SubmitTask> for Worker {
         let name = message.task_name.clone();
         let id = message.id.clone();
         let args = message.args.clone();
-        let distributed = self.swarm.is_some();
+        let distributed = true;
         info!("Worker received script: {:?}", &message);
         if let Some(orca) = self.registered_tasks.get(&name) {
             let orca = TaskRun::new(
@@ -241,8 +235,9 @@ impl Message<SubmitTask> for Worker {
                 Some(orca.task_future.clone()),
                 args,
                 None,
-                distributed
-            ).await;
+                distributed,
+            )
+            .await;
             self.task_runs.insert(id, orca);
             Ok(())
         } else {
@@ -263,7 +258,7 @@ impl Message<GetResultById> for Worker {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let task_id = message.task_id.clone();
-        let res = self.processor.as_ref().unwrap().ask(message).await;
+        let res = self.statekeeper.ask(message).await;
         let result_string = match res {
             Ok(result_string) => {
                 if let Some(result) = result_string {
