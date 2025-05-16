@@ -99,7 +99,7 @@ impl Message<CreateTaskRun> for Worker {
         if let Some(_orca) = self.registered_tasks.get(&message.task_name) {
             let processor_result_for_match: Result<(), OrcaError>;
             let now = Utc::now().timestamp_millis();
-            let distributed = true;
+        
 
             if let Some(delay) = message.delay {
                 let submit_at_ms = now + delay * 1000;
@@ -124,17 +124,16 @@ impl Message<CreateTaskRun> for Worker {
                         cache_policy: message.cache_policy,
                     })
                     .await
-                    .map(|_| ())
                     .map_err(|e| OrcaError(format!("Error sending task: {}", e)));
             }
 
             match processor_result_for_match {
                 Ok(()) => {
                     let run_handle =
-                        Handler::new(self.statekeeper.clone(), task_id.clone(), distributed).await;
+                        Handler::new(self.statekeeper.clone(), task_id.clone()).await;
                     Ok(run_handle)
                 }
-                Err(e) => Err(e), // e is already OrcaError
+                Err(e) => Err(e),
             }
         } else {
             Err(OrcaError(format!(
@@ -225,7 +224,6 @@ impl Message<SubmitTask> for Worker {
         let name = message.task_name.clone();
         let id = message.id.clone();
         let args = message.args.clone();
-        let distributed = true;
         info!("Worker received script: {:?}", &message);
         if let Some(orca) = self.registered_tasks.get(&name) {
             let orca = TaskRun::new(
@@ -235,7 +233,6 @@ impl Message<SubmitTask> for Worker {
                 Some(orca.task_future.clone()),
                 args,
                 None,
-                distributed,
             )
             .await;
             self.task_runs.insert(id, orca);

@@ -12,7 +12,6 @@ pub struct Seer {
     task_id: String,
     statekeeper_ref: ActorRef<StateKeeper>,
     notify_result_ready: Arc<Notify>,
-    distributed: bool,
     run_state: Option<RunState>,
 }
 
@@ -20,14 +19,12 @@ impl Seer {
     pub async fn new(
         statekeeper_ref: ActorRef<StateKeeper>,
         task_id: String,
-        distributed: bool,
     ) -> ActorRef<Seer> {
         let notify_result_ready = Arc::new(Notify::new());
         Seer::spawn(Self {
             task_id,
             statekeeper_ref,
             notify_result_ready,
-            distributed,
             run_state: None,
         })
     }
@@ -38,10 +35,9 @@ impl Actor for Seer {
     type Error = OrcaError;
 
     async fn on_start(args: Self::Args, actor_ref: ActorRef<Seer>) -> Result<Self, OrcaError> {
-        if args.distributed {
-            let res = actor_ref
-                .register(format!("seer-{}", args.task_id).as_str())
-                .await;
+        let res = actor_ref
+            .register(format!("seer-{}", args.task_id).as_str())
+            .await;
             match res {
                 Ok(_) => {
                     info!("Registered seer for task {}", args.task_id);
@@ -50,7 +46,7 @@ impl Actor for Seer {
                     info!("Error registering seer for task {}", args.task_id);
                 }
             }
-        }
+        
         Ok(args)
     }
 }
@@ -175,9 +171,9 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub async fn new(actor_ref: ActorRef<StateKeeper>, task_id: String, distributed: bool) -> Self {
+    pub async fn new(actor_ref: ActorRef<StateKeeper>, task_id: String) -> Self {
         Self {
-            seer_ref: Seer::new(actor_ref, task_id, distributed).await,
+            seer_ref: Seer::new(actor_ref, task_id).await,
         }
     }
     pub async fn result(&self, timeout: impl Into<Option<i64>>) -> Result<String, OrcaError> {

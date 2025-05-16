@@ -5,13 +5,13 @@ use crate::worker::Worker;
 use kameo::Actor;
 use kameo::actor::RemoteActorRef;
 use kameo::prelude::{ActorRef, ActorStopReason, Context, Message, WeakActorRef};
+use redis;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
-use redis;
 
 //This will problably be bytes in the future.
 pub type SerializedTaskData = String;
@@ -38,7 +38,6 @@ pub struct TaskRun {
     pub args: Option<String>,
     max_retries: u32,
     result: Option<String>,
-    distributed: bool,
     seer: Option<RemoteActorRef<Seer>>,
     ttl: i64,
 }
@@ -51,23 +50,20 @@ impl TaskRun {
         future: Option<SerializedTaskFuture>,
         args: Option<String>,
         max_retries: Option<u32>,
-        distributed: bool,
     ) -> ActorRef<TaskRun> {
         let mut seer: Option<RemoteActorRef<Seer>> = None;
-        if distributed {
-            let lookup_result =
-                RemoteActorRef::<Seer>::lookup(format!("seer-{}", id).as_str()).await;
-            match lookup_result {
-                Ok(seer_ref) => seer = seer_ref,
-                Err(_) => {
-                    info!(
-                        "Error looking up seer for task {},will attempt on state change",
-                        id
-                    );
-                    seer = None;
-                }
-            };
-        }
+
+        let lookup_result = RemoteActorRef::<Seer>::lookup(format!("seer-{}", id).as_str()).await;
+        match lookup_result {
+            Ok(seer_ref) => seer = seer_ref,
+            Err(_) => {
+                info!(
+                    "Error looking up seer for task {},will attempt on state change",
+                    id
+                );
+                seer = None;
+            }
+        };
 
         let ttl = 60 * 60 * 24;
         let args = Self {
@@ -80,7 +76,6 @@ impl TaskRun {
             args: args,
             max_retries: max_retries.unwrap_or(0),
             result: None,
-            distributed,
             seer,
             ttl,
         };
@@ -248,44 +243,43 @@ impl Message<FutureResult> for TaskRun {
                 final_state = RunState::Failed;
             }
         }
-        if self.distributed {
-            let seer_ref = self.seer.as_ref();
-            if let Some(seer) = seer_ref {
-                let _ = seer
-                    .tell(&UpdateSeer {
-                        state: final_state.clone(),
-                    })
-                    .await;
-            } else {
-                let lookup_result =
-                    RemoteActorRef::<Seer>::lookup(format!("seer-{}", self.id).as_str()).await;
-                match lookup_result {
-                    Ok(seer) => {
-                        let _ = seer
-                            .unwrap()
-                            .tell(&UpdateSeer {
-                                state: final_state.clone(),
-                            })
-                            .await;
-                    }
-                    Err(_) => {
-                        info!("Error looking up seer for task {}", self.id);
-                    }
+
+        let seer_ref = self.seer.as_ref();
+        if let Some(seer) = seer_ref {
+            let _ = seer
+                .tell(&UpdateSeer {
+                    state: final_state.clone(),
+                })
+                .await;
+        } else {
+            let lookup_result =
+                RemoteActorRef::<Seer>::lookup(format!("seer-{}", self.id).as_str()).await;
+            match lookup_result {
+                Ok(seer) => {
+                    let _ = seer
+                        .unwrap()
+                        .tell(&UpdateSeer {
+                            state: final_state.clone(),
+                        })
+                        .await;
+                }
+                Err(_) => {
+                    info!("Error looking up seer for task {}", self.id);
                 }
             }
-        }
-        match self.transition_to_state(final_state.clone()).await {
-            Ok(_) => {
-                info!(
-                    "Internal state updated to {} for task {}",
-                    final_state, self.id
-                );
-            }
-            Err(e) => {
-                eprintln!(
-                    "State transition to {} failed for Task {}: {}",
-                    final_state, self.id, e
-                );
+            match self.transition_to_state(final_state.clone()).await {
+                Ok(_) => {
+                    info!(
+                        "Internal state updated to {} for task {}",
+                        final_state, self.id
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "State transition to {} failed for Task {}: {}",
+                        final_state, self.id, e
+                    );
+                }
             }
         }
     }

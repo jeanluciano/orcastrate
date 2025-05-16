@@ -1,3 +1,4 @@
+use crate::error::OrcaError;
 use crate::messages::*;
 use crate::task::CachePolicy;
 use crate::worker::Worker;
@@ -29,7 +30,6 @@ impl GateKeeper {
         id: Uuid,
         mut redis: MultiplexedConnection,
         worker: ActorRef<Worker>,
-        // processor: ActorRef<Processor>, // Add processor back if direct communication is needed
     ) {
         info!("GateKeeper starting processing loop for {}", id);
         let consumer_id = id.to_string();
@@ -74,21 +74,21 @@ impl GateKeeper {
     }
 
     async fn process_message(worker: &ActorRef<Worker>, map: &HashMap<String, redis::Value>) {
-        match Self::parse_script(map) {
-            Ok(script) => {
+        match Self::parse_task_run(map) {
+            Ok(task_run) => {
                 info!(
-                    "GateKeeper processing Script: {}, args: {:?}",
-                    script.id, script.args
+                    "GateKeeper processing TaskRun: {}, args: {:?}",
+                    task_run.id, task_run.args
                 );
-                let _ = worker.tell(script).await;
+                let _ = worker.tell(task_run).await;
             }
             Err(e) => {
-                eprintln!("Error parsing script: {}", e);
+                eprintln!("Error parsing task run: {}", e);
             }
         }
     }
 
-    fn parse_script(map: &HashMap<String, redis::Value>) -> Result<SubmitTask, String> {
+    fn parse_task_run(map: &HashMap<String, redis::Value>) -> Result<SubmitTask, String> {
         let task_id_val = map.get("id").ok_or("Missing task_id")?;
         let task_id_str: String = redis::from_redis_value(task_id_val)
             .map_err(|e| format!("task_id not string: {}", e))?;
@@ -115,12 +115,10 @@ impl GateKeeper {
         })
     }
 
-    pub async fn publish_script(&mut self, message: SubmitTask) -> RedisResult<String> {
-        info!("GateKeeper preparing to submit script: {:?}", message);
+    pub async fn submit_task(&mut self, message: SubmitTask) -> Result<String, OrcaError> {
+        info!("GateKeeper preparing to submit task: {:?}", message);
 
-        let task_id = message.id.clone(); // Clone id for potential later use
-
-        // 1. Check if signature is already locally reserved (for Signature/Source policies)
+        let task_id = message.id.clone();
         if matches!(
             message.cache_policy,
             CachePolicy::Signature | CachePolicy::Source
@@ -132,15 +130,14 @@ impl GateKeeper {
                     task_id
                 );
                 // Return an error indicating it's already reserved
-                return Err(RedisError::from(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists, // Use AlreadyExists for clarity
-                    "Signature already reserved locally",
+                return Err(OrcaError(format!(
+                    "Signature {} is already locally reserved, skipping submission.",
+                    task_id
                 )));
             }
             // Drop the lock here, we only needed to check
         }
 
-        // 2. Prepare arguments for Redis xadd
         let key_values: &[(&str, String)] = &[
             ("task_name", message.task_name.clone()),
             ("id", task_id.clone()), // Use the cloned id
@@ -210,21 +207,24 @@ impl GateKeeper {
                     "GateKeeper failed to add task {} to Redis stream {}: {:?}",
                     task_id, GATEKEEPER_STREAM_KEY, e
                 );
-                Err(e) // Return the Redis error
+                Err(OrcaError(format!(
+                    "GateKeeper failed to add task {} to Redis stream {}: {:?}",
+                    task_id, GATEKEEPER_STREAM_KEY, e
+                )))
             }
         }
     }
 }
 
 impl Message<SubmitTask> for GateKeeper {
-    type Reply = Result<(), RedisError>;
+    type Reply = Result<(), OrcaError>;
 
     async fn handle(
         &mut self,
         message: SubmitTask,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let _ = self.publish_script(message).await;
+        let _ = self.submit_task(message).await;
         Ok(())
     }
 }
